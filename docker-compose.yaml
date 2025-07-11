@@ -1,0 +1,36 @@
+services:
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: rabbitmq
+    hostname: rabbitmq
+    ports:
+      - "5672:5672"      # AMQP port
+      - "15672:15672"    # Management UI
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - amqp-network
+
+  amqp-client:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: amqp-client
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    command: ["/usr/local/bin/start_amqp.sh"]
+    networks:
+      - amqp-network
+    stdin_open: true
+    tty: true
+
+networks:
+  amqp-network:
+    driver: bridge
