@@ -15,6 +15,15 @@ rabbitmq:
 amqpClient:
   image: amqp-client:latest
   host: rabbitmq-service
+  port: 5672
+  user: guest
+  password: guest
+  vhost: /
+  exchange: test_exchange
+  topic: test.key
+  queue: test_queue
+  sendCount: 1000
+  receiveCount: 1000
 
 ---
 # templates/rabbitmq.yaml
@@ -87,6 +96,27 @@ spec:
         command:
         - sh
         - -c
-        - "while date; do sleep 1; done | /usr/local/bin/amqp-client -H {{ .Values.amqpClient.host }}"
+        - "./start_amqp.sh both"
+        env:
+        - name: AMQP_HOST
+          value: {{ .Values.amqpClient.host }}
+        - name: AMQP_PORT
+          value: "{{ .Values.amqpClient.port }}"
+        - name: AMQP_USER
+          value: {{ .Values.amqpClient.user }}
+        - name: AMQP_PASSWORD
+          value: {{ .Values.amqpClient.password }}
+        - name: AMQP_VHOST
+          value: {{ .Values.amqpClient.vhost }}
+        - name: AMQP_EXCHANGE
+          value: {{ .Values.amqpClient.exchange }}
+        - name: AMQP_TOPIC
+          value: {{ .Values.amqpClient.topic }}
+        - name: AMQP_QUEUE
+          value: {{ .Values.amqpClient.queue }}
+        - name: AMQP_SEND_COUNT
+          value: "{{ .Values.amqpClient.sendCount }}"
+        - name: AMQP_RECEIVE_COUNT
+          value: "{{ .Values.amqpClient.receiveCount }}"
         stdin: true
         tty: true
