@@ -1,3 +1,4 @@
+use clap::{Parser, ValueEnum};
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -5,7 +6,6 @@ use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use uuid::Uuid;
-use clap::{Parser, ValueEnum};
 
 // === LOGGING INFRASTRUCTURE ===
 
@@ -102,7 +102,11 @@ impl MessageDrain {
                     valid: false,
                     sequence: None,
                     timestamp: None,
-                    error: Some(format!("Expected prefix '{}', got '{}'", expected, parts.get(0).unwrap_or(&""))),
+                    error: Some(format!(
+                        "Expected prefix '{}', got '{}'",
+                        expected,
+                        parts.get(0).unwrap_or(&"")
+                    )),
                 });
             }
         }
@@ -266,8 +270,13 @@ impl Value {
             Value::U32(v) => v.to_be_bytes().to_vec(),
             Value::U64(v) => v.to_be_bytes().to_vec(),
             Value::ShortString(s) => [vec![s.len() as u8], s.as_bytes().to_vec()].concat(),
-            Value::LongString(data) => [(data.len() as u32).to_be_bytes().to_vec(), data.clone()].concat(),
-            Value::Flags(flags) => vec![flags.iter().take(8).enumerate()
+            Value::LongString(data) => {
+                [(data.len() as u32).to_be_bytes().to_vec(), data.clone()].concat()
+            }
+            Value::Flags(flags) => vec![flags
+                .iter()
+                .take(8)
+                .enumerate()
                 .fold(0u8, |acc, (i, &flag)| acc | ((flag as u8) << i))],
             Value::Table(_) => vec![0, 0, 0, 0], // Empty table for simplicity
         }
@@ -483,7 +492,11 @@ pub struct AmqpLib;
 
 impl AmqpLib {
     // === FRAME I/O ===
-    pub async fn send_frame(stream: &mut TcpStream, frame: Vec<u8>, log_config: &LogConfig) -> Result<usize> {
+    pub async fn send_frame(
+        stream: &mut TcpStream,
+        frame: Vec<u8>,
+        log_config: &LogConfig,
+    ) -> Result<usize> {
         log_trace(log_config, &format!("Sending frame: {} bytes", frame.len()));
         let bytes_written = frame.len();
         stream.write_all(&frame).await.map_err(AmqpError::Io)?;
@@ -493,14 +506,27 @@ impl AmqpLib {
 
     pub async fn receive_frame(stream: &mut TcpStream, log_config: &LogConfig) -> Result<Vec<u8>> {
         let mut header = [0u8; 7];
-        stream.read_exact(&mut header).await.map_err(AmqpError::Io)?;
+        stream
+            .read_exact(&mut header)
+            .await
+            .map_err(AmqpError::Io)?;
 
         let payload_len = u32::from_be_bytes([header[3], header[4], header[5], header[6]]) as usize;
         let mut payload = vec![0u8; payload_len + 1];
-        stream.read_exact(&mut payload).await.map_err(AmqpError::Io)?;
+        stream
+            .read_exact(&mut payload)
+            .await
+            .map_err(AmqpError::Io)?;
 
-        log_trace(log_config, &format!("Received frame: type={}, channel={}, payload_len={}",
-            header[0], u16::from_be_bytes([header[1], header[2]]), payload_len));
+        log_trace(
+            log_config,
+            &format!(
+                "Received frame: type={}, channel={}, payload_len={}",
+                header[0],
+                u16::from_be_bytes([header[1], header[2]]),
+                payload_len
+            ),
+        );
 
         Ok([&header[..], &payload].concat())
     }
@@ -535,7 +561,9 @@ impl AmqpLib {
                 Duration::from_secs(30)
             };
 
-            match tokio::time::timeout(timeout_duration, Self::receive_frame(stream, log_config)).await {
+            match tokio::time::timeout(timeout_duration, Self::receive_frame(stream, log_config))
+                .await
+            {
                 Ok(frame_result) => {
                     let frame = frame_result?;
                     let (frame_type, channel, _payload) = Self::parse_frame(&frame)?;
@@ -546,7 +574,8 @@ impl AmqpLib {
                         constants::FRAME_HEARTBEAT => {
                             if channel != 0 {
                                 return Err(AmqpError::Protocol(format!(
-                                    "Invalid heartbeat frame: channel must be 0, got {}", channel
+                                    "Invalid heartbeat frame: channel must be 0, got {}",
+                                    channel
                                 )));
                             }
                             log_trace(log_config, "Received heartbeat frame");
@@ -570,7 +599,8 @@ impl AmqpLib {
     // === FRAME PARSING ===
     pub fn parse_frame(data: &[u8]) -> Result<(u8, u16, &[u8])> {
         match data {
-            [frame_type, ch_hi, ch_lo, len_a, len_b, len_c, len_d, payload @ .., constants::FRAME_END_BYTE] => {
+            [frame_type, ch_hi, ch_lo, len_a, len_b, len_c, len_d, payload @ .., constants::FRAME_END_BYTE] =>
+            {
                 let channel = u16::from_be_bytes([*ch_hi, *ch_lo]);
                 let payload_len = u32::from_be_bytes([*len_a, *len_b, *len_c, *len_d]) as usize;
 
@@ -586,13 +616,11 @@ impl AmqpLib {
 
     pub fn parse_method_frame(payload: &[u8]) -> Result<(u16, u16, &[u8])> {
         match payload {
-            [class_hi, class_lo, method_hi, method_lo, args @ ..] => {
-                Ok((
-                    u16::from_be_bytes([*class_hi, *class_lo]),
-                    u16::from_be_bytes([*method_hi, *method_lo]),
-                    args
-                ))
-            }
+            [class_hi, class_lo, method_hi, method_lo, args @ ..] => Ok((
+                u16::from_be_bytes([*class_hi, *class_lo]),
+                u16::from_be_bytes([*method_hi, *method_lo]),
+                args,
+            )),
             _ => Err(AmqpError::Protocol("Invalid method frame".into())),
         }
     }
@@ -604,16 +632,22 @@ impl AmqpLib {
             &channel.to_be_bytes()[..],
             &(payload.len() as u32).to_be_bytes(),
             payload,
-            &[constants::FRAME_END_BYTE]
-        ].concat()
+            &[constants::FRAME_END_BYTE],
+        ]
+        .concat()
     }
 
     pub fn build_method_frame(channel: u16, class: u16, method: u16, args: &[Value]) -> Vec<u8> {
-        Self::build_raw_frame(constants::FRAME_METHOD, channel, &[
-            class.to_be_bytes().to_vec(),
-            method.to_be_bytes().to_vec(),
-            args.iter().flat_map(|v| v.to_bytes()).collect()
-        ].concat())
+        Self::build_raw_frame(
+            constants::FRAME_METHOD,
+            channel,
+            &[
+                class.to_be_bytes().to_vec(),
+                method.to_be_bytes().to_vec(),
+                args.iter().flat_map(|v| v.to_bytes()).collect(),
+            ]
+            .concat(),
+        )
     }
 
     pub fn build_heartbeat_frame() -> Vec<u8> {
@@ -622,197 +656,372 @@ impl AmqpLib {
 
     // === CONNECTION FRAMES ===
     pub fn build_connection_start_frame() -> Vec<u8> {
-        Self::build_method_frame(0, constants::CONNECTION_CLASS, constants::CONNECTION_START, &[
-            Value::U8(0), // version_major
-            Value::U8(9), // version_minor
-            Value::Table(HashMap::new()), // server_properties
-            Value::LongString(b"PLAIN".to_vec()), // mechanisms
-            Value::LongString(b"en_US".to_vec()), // locales
-        ])
+        Self::build_method_frame(
+            0,
+            constants::CONNECTION_CLASS,
+            constants::CONNECTION_START,
+            &[
+                Value::U8(0),                         // version_major
+                Value::U8(9),                         // version_minor
+                Value::Table(HashMap::new()),         // server_properties
+                Value::LongString(b"PLAIN".to_vec()), // mechanisms
+                Value::LongString(b"en_US".to_vec()), // locales
+            ],
+        )
     }
 
     pub fn build_connection_start_ok_frame(username: &str, password: &str) -> Vec<u8> {
-        Self::build_method_frame(0, constants::CONNECTION_CLASS, constants::CONNECTION_START_OK, &[
-            Value::Table(HashMap::new()),
-            Value::ShortString("PLAIN".to_string()),
-            Value::LongString(format!("\x00{}\x00{}", username, password).into_bytes()),
-            Value::ShortString("en_US".to_string()),
-        ])
+        Self::build_method_frame(
+            0,
+            constants::CONNECTION_CLASS,
+            constants::CONNECTION_START_OK,
+            &[
+                Value::Table(HashMap::new()),
+                Value::ShortString("PLAIN".to_string()),
+                Value::LongString(format!("\x00{}\x00{}", username, password).into_bytes()),
+                Value::ShortString("en_US".to_string()),
+            ],
+        )
     }
 
-    pub fn build_connection_tune_frame(channel_max: u16, frame_max: u32, heartbeat: u16) -> Vec<u8> {
-        Self::build_method_frame(0, constants::CONNECTION_CLASS, constants::CONNECTION_TUNE, &[
-            Value::U16(channel_max),
-            Value::U32(frame_max),
-            Value::U16(heartbeat),
-        ])
+    pub fn build_connection_tune_frame(
+        channel_max: u16,
+        frame_max: u32,
+        heartbeat: u16,
+    ) -> Vec<u8> {
+        Self::build_method_frame(
+            0,
+            constants::CONNECTION_CLASS,
+            constants::CONNECTION_TUNE,
+            &[
+                Value::U16(channel_max),
+                Value::U32(frame_max),
+                Value::U16(heartbeat),
+            ],
+        )
     }
 
-    pub fn build_connection_tune_ok_frame(channel_max: u16, frame_max: u32, heartbeat: u16) -> Vec<u8> {
-        Self::build_method_frame(0, constants::CONNECTION_CLASS, constants::CONNECTION_TUNE_OK, &[
-            Value::U16(channel_max),
-            Value::U32(frame_max),
-            Value::U16(heartbeat),
-        ])
+    pub fn build_connection_tune_ok_frame(
+        channel_max: u16,
+        frame_max: u32,
+        heartbeat: u16,
+    ) -> Vec<u8> {
+        Self::build_method_frame(
+            0,
+            constants::CONNECTION_CLASS,
+            constants::CONNECTION_TUNE_OK,
+            &[
+                Value::U16(channel_max),
+                Value::U32(frame_max),
+                Value::U16(heartbeat),
+            ],
+        )
     }
 
     pub fn build_connection_open_frame(virtual_host: &str) -> Vec<u8> {
-        Self::build_method_frame(0, constants::CONNECTION_CLASS, constants::CONNECTION_OPEN, &[
-            Value::ShortString(virtual_host.to_string()),
-            Value::ShortString("".to_string()),
-            Value::U8(0),
-        ])
+        Self::build_method_frame(
+            0,
+            constants::CONNECTION_CLASS,
+            constants::CONNECTION_OPEN,
+            &[
+                Value::ShortString(virtual_host.to_string()),
+                Value::ShortString("".to_string()),
+                Value::U8(0),
+            ],
+        )
     }
 
     pub fn build_connection_open_ok_frame() -> Vec<u8> {
-        Self::build_method_frame(0, constants::CONNECTION_CLASS, constants::CONNECTION_OPEN_OK, &[
-            Value::ShortString("".to_string()),
-        ])
+        Self::build_method_frame(
+            0,
+            constants::CONNECTION_CLASS,
+            constants::CONNECTION_OPEN_OK,
+            &[Value::ShortString("".to_string())],
+        )
     }
 
     // === CHANNEL FRAMES ===
     pub fn build_channel_open_frame(channel: u16) -> Vec<u8> {
-        Self::build_method_frame(channel, constants::CHANNEL_CLASS, constants::CHANNEL_OPEN, &[
-            Value::ShortString("".to_string()),
-        ])
+        Self::build_method_frame(
+            channel,
+            constants::CHANNEL_CLASS,
+            constants::CHANNEL_OPEN,
+            &[Value::ShortString("".to_string())],
+        )
     }
 
     pub fn build_channel_open_ok_frame(channel: u16) -> Vec<u8> {
-        Self::build_method_frame(channel, constants::CHANNEL_CLASS, constants::CHANNEL_OPEN_OK, &[
-            Value::LongString(vec![]), // reserved
-        ])
+        Self::build_method_frame(
+            channel,
+            constants::CHANNEL_CLASS,
+            constants::CHANNEL_OPEN_OK,
+            &[
+                Value::LongString(vec![]), // reserved
+            ],
+        )
     }
 
     // === EXCHANGE FRAMES ===
-    pub fn build_exchange_declare_frame(channel: u16, exchange: &str, exchange_type: &str, durable: bool, auto_delete: bool, internal: bool) -> Vec<u8> {
+    pub fn build_exchange_declare_frame(
+        channel: u16,
+        exchange: &str,
+        exchange_type: &str,
+        durable: bool,
+        auto_delete: bool,
+        internal: bool,
+    ) -> Vec<u8> {
         let flags = vec![false, durable, auto_delete, internal, false]; // passive, durable, auto_delete, internal, no_wait
-        Self::build_method_frame(channel, constants::EXCHANGE_CLASS, constants::EXCHANGE_DECLARE, &[
-            Value::U16(0), // reserved
-            Value::ShortString(exchange.to_string()),
-            Value::ShortString(exchange_type.to_string()),
-            Value::Flags(flags),
-            Value::Table(HashMap::new()), // arguments
-        ])
+        Self::build_method_frame(
+            channel,
+            constants::EXCHANGE_CLASS,
+            constants::EXCHANGE_DECLARE,
+            &[
+                Value::U16(0), // reserved
+                Value::ShortString(exchange.to_string()),
+                Value::ShortString(exchange_type.to_string()),
+                Value::Flags(flags),
+                Value::Table(HashMap::new()), // arguments
+            ],
+        )
     }
 
     pub fn build_exchange_declare_ok_frame(channel: u16) -> Vec<u8> {
-        Self::build_method_frame(channel, constants::EXCHANGE_CLASS, constants::EXCHANGE_DECLARE_OK, &[])
+        Self::build_method_frame(
+            channel,
+            constants::EXCHANGE_CLASS,
+            constants::EXCHANGE_DECLARE_OK,
+            &[],
+        )
     }
 
     // === QUEUE FRAMES ===
-    pub fn build_queue_declare_frame(channel: u16, queue: &str, durable: bool, exclusive: bool, auto_delete: bool) -> Vec<u8> {
+    pub fn build_queue_declare_frame(
+        channel: u16,
+        queue: &str,
+        durable: bool,
+        exclusive: bool,
+        auto_delete: bool,
+    ) -> Vec<u8> {
         let flags = vec![false, durable, exclusive, auto_delete, false]; // passive, durable, exclusive, auto_delete, no_wait
-        Self::build_method_frame(channel, constants::QUEUE_CLASS, constants::QUEUE_DECLARE, &[
-            Value::U16(0), // reserved
-            Value::ShortString(queue.to_string()),
-            Value::Flags(flags),
-            Value::Table(HashMap::new()), // arguments
-        ])
+        Self::build_method_frame(
+            channel,
+            constants::QUEUE_CLASS,
+            constants::QUEUE_DECLARE,
+            &[
+                Value::U16(0), // reserved
+                Value::ShortString(queue.to_string()),
+                Value::Flags(flags),
+                Value::Table(HashMap::new()), // arguments
+            ],
+        )
     }
 
-    pub fn build_queue_declare_ok_frame(channel: u16, queue: &str, message_count: u32, consumer_count: u32) -> Vec<u8> {
-        Self::build_method_frame(channel, constants::QUEUE_CLASS, constants::QUEUE_DECLARE_OK, &[
-            Value::ShortString(queue.to_string()),
-            Value::U32(message_count),
-            Value::U32(consumer_count),
-        ])
+    pub fn build_queue_declare_ok_frame(
+        channel: u16,
+        queue: &str,
+        message_count: u32,
+        consumer_count: u32,
+    ) -> Vec<u8> {
+        Self::build_method_frame(
+            channel,
+            constants::QUEUE_CLASS,
+            constants::QUEUE_DECLARE_OK,
+            &[
+                Value::ShortString(queue.to_string()),
+                Value::U32(message_count),
+                Value::U32(consumer_count),
+            ],
+        )
     }
 
-    pub fn build_queue_bind_frame(channel: u16, queue: &str, exchange: &str, routing_key: &str) -> Vec<u8> {
-        Self::build_method_frame(channel, constants::QUEUE_CLASS, constants::QUEUE_BIND, &[
-            Value::U16(0), // reserved
-            Value::ShortString(queue.to_string()),
-            Value::ShortString(exchange.to_string()),
-            Value::ShortString(routing_key.to_string()),
-            Value::U8(0), // no_wait
-            Value::Table(HashMap::new()), // arguments
-        ])
+    pub fn build_queue_bind_frame(
+        channel: u16,
+        queue: &str,
+        exchange: &str,
+        routing_key: &str,
+    ) -> Vec<u8> {
+        Self::build_method_frame(
+            channel,
+            constants::QUEUE_CLASS,
+            constants::QUEUE_BIND,
+            &[
+                Value::U16(0), // reserved
+                Value::ShortString(queue.to_string()),
+                Value::ShortString(exchange.to_string()),
+                Value::ShortString(routing_key.to_string()),
+                Value::U8(0),                 // no_wait
+                Value::Table(HashMap::new()), // arguments
+            ],
+        )
     }
 
     pub fn build_queue_bind_ok_frame(channel: u16) -> Vec<u8> {
-        Self::build_method_frame(channel, constants::QUEUE_CLASS, constants::QUEUE_BIND_OK, &[])
+        Self::build_method_frame(
+            channel,
+            constants::QUEUE_CLASS,
+            constants::QUEUE_BIND_OK,
+            &[],
+        )
     }
 
     // === BASIC FRAMES ===
-    pub fn build_basic_qos_frame(channel: u16, prefetch_size: u32, prefetch_count: u16, global: bool) -> Vec<u8> {
-        Self::build_method_frame(channel, constants::BASIC_CLASS, constants::BASIC_QOS, &[
-            Value::U32(prefetch_size),
-            Value::U16(prefetch_count),
-            Value::U8(if global { 1 } else { 0 }),
-        ])
+    pub fn build_basic_qos_frame(
+        channel: u16,
+        prefetch_size: u32,
+        prefetch_count: u16,
+        global: bool,
+    ) -> Vec<u8> {
+        Self::build_method_frame(
+            channel,
+            constants::BASIC_CLASS,
+            constants::BASIC_QOS,
+            &[
+                Value::U32(prefetch_size),
+                Value::U16(prefetch_count),
+                Value::U8(if global { 1 } else { 0 }),
+            ],
+        )
     }
 
     pub fn build_basic_qos_ok_frame(channel: u16) -> Vec<u8> {
-        Self::build_method_frame(channel, constants::BASIC_CLASS, constants::BASIC_QOS_OK, &[])
+        Self::build_method_frame(
+            channel,
+            constants::BASIC_CLASS,
+            constants::BASIC_QOS_OK,
+            &[],
+        )
     }
 
-    pub fn build_basic_consume_frame(channel: u16, queue: &str, consumer_tag: &str, no_local: bool, no_ack: bool, exclusive: bool) -> Vec<u8> {
+    pub fn build_basic_consume_frame(
+        channel: u16,
+        queue: &str,
+        consumer_tag: &str,
+        no_local: bool,
+        no_ack: bool,
+        exclusive: bool,
+    ) -> Vec<u8> {
         let flags = vec![no_local, no_ack, exclusive, false]; // no_local, no_ack, exclusive, no_wait
-        Self::build_method_frame(channel, constants::BASIC_CLASS, constants::BASIC_CONSUME, &[
-            Value::U16(0), // reserved
-            Value::ShortString(queue.to_string()),
-            Value::ShortString(consumer_tag.to_string()),
-            Value::Flags(flags),
-            Value::Table(HashMap::new()), // arguments
-        ])
+        Self::build_method_frame(
+            channel,
+            constants::BASIC_CLASS,
+            constants::BASIC_CONSUME,
+            &[
+                Value::U16(0), // reserved
+                Value::ShortString(queue.to_string()),
+                Value::ShortString(consumer_tag.to_string()),
+                Value::Flags(flags),
+                Value::Table(HashMap::new()), // arguments
+            ],
+        )
     }
 
     pub fn build_basic_consume_ok_frame(channel: u16, consumer_tag: &str) -> Vec<u8> {
-        Self::build_method_frame(channel, constants::BASIC_CLASS, constants::BASIC_CONSUME_OK, &[
-            Value::ShortString(consumer_tag.to_string()),
-        ])
+        Self::build_method_frame(
+            channel,
+            constants::BASIC_CLASS,
+            constants::BASIC_CONSUME_OK,
+            &[Value::ShortString(consumer_tag.to_string())],
+        )
     }
 
-    pub fn build_basic_publish_frame(channel: u16, exchange: &str, routing_key: &str, mandatory: bool, immediate: bool) -> Vec<u8> {
+    pub fn build_basic_publish_frame(
+        channel: u16,
+        exchange: &str,
+        routing_key: &str,
+        mandatory: bool,
+        immediate: bool,
+    ) -> Vec<u8> {
         let flags = vec![mandatory, immediate];
-        Self::build_method_frame(channel, constants::BASIC_CLASS, constants::BASIC_PUBLISH, &[
-            Value::U16(0), // reserved
-            Value::ShortString(exchange.to_string()),
-            Value::ShortString(routing_key.to_string()),
-            Value::Flags(flags),
-        ])
+        Self::build_method_frame(
+            channel,
+            constants::BASIC_CLASS,
+            constants::BASIC_PUBLISH,
+            &[
+                Value::U16(0), // reserved
+                Value::ShortString(exchange.to_string()),
+                Value::ShortString(routing_key.to_string()),
+                Value::Flags(flags),
+            ],
+        )
     }
 
-    pub fn build_basic_deliver_frame(channel: u16, consumer_tag: &str, delivery_tag: u64, redelivered: bool, exchange: &str, routing_key: &str) -> Vec<u8> {
-        Self::build_method_frame(channel, constants::BASIC_CLASS, constants::BASIC_DELIVER, &[
-            Value::ShortString(consumer_tag.to_string()),
-            Value::U64(delivery_tag),
-            Value::U8(if redelivered { 1 } else { 0 }),
-            Value::ShortString(exchange.to_string()),
-            Value::ShortString(routing_key.to_string()),
-        ])
+    pub fn build_basic_deliver_frame(
+        channel: u16,
+        consumer_tag: &str,
+        delivery_tag: u64,
+        redelivered: bool,
+        exchange: &str,
+        routing_key: &str,
+    ) -> Vec<u8> {
+        Self::build_method_frame(
+            channel,
+            constants::BASIC_CLASS,
+            constants::BASIC_DELIVER,
+            &[
+                Value::ShortString(consumer_tag.to_string()),
+                Value::U64(delivery_tag),
+                Value::U8(if redelivered { 1 } else { 0 }),
+                Value::ShortString(exchange.to_string()),
+                Value::ShortString(routing_key.to_string()),
+            ],
+        )
     }
 
     pub fn build_basic_ack_frame(channel: u16, delivery_tag: u64, multiple: bool) -> Vec<u8> {
-        Self::build_method_frame(channel, constants::BASIC_CLASS, constants::BASIC_ACK, &[
-            Value::U64(delivery_tag),
-            Value::U8(if multiple { 1 } else { 0 }),
-        ])
+        Self::build_method_frame(
+            channel,
+            constants::BASIC_CLASS,
+            constants::BASIC_ACK,
+            &[
+                Value::U64(delivery_tag),
+                Value::U8(if multiple { 1 } else { 0 }),
+            ],
+        )
     }
 
     pub fn build_basic_reject_frame(channel: u16, delivery_tag: u64, requeue: bool) -> Vec<u8> {
-        Self::build_method_frame(channel, constants::BASIC_CLASS, constants::BASIC_REJECT, &[
-            Value::U64(delivery_tag),
-            Value::U8(if requeue { 1 } else { 0 }),
-        ])
+        Self::build_method_frame(
+            channel,
+            constants::BASIC_CLASS,
+            constants::BASIC_REJECT,
+            &[
+                Value::U64(delivery_tag),
+                Value::U8(if requeue { 1 } else { 0 }),
+            ],
+        )
     }
 
-    pub fn build_basic_nack_frame(channel: u16, delivery_tag: u64, multiple: bool, requeue: bool) -> Vec<u8> {
-        Self::build_method_frame(channel, constants::BASIC_CLASS, constants::BASIC_NACK, &[
-            Value::U64(delivery_tag),
-            Value::U8(if multiple { 1 } else { 0 }),
-            Value::U8(if requeue { 1 } else { 0 }),
-        ])
+    pub fn build_basic_nack_frame(
+        channel: u16,
+        delivery_tag: u64,
+        multiple: bool,
+        requeue: bool,
+    ) -> Vec<u8> {
+        Self::build_method_frame(
+            channel,
+            constants::BASIC_CLASS,
+            constants::BASIC_NACK,
+            &[
+                Value::U64(delivery_tag),
+                Value::U8(if multiple { 1 } else { 0 }),
+                Value::U8(if requeue { 1 } else { 0 }),
+            ],
+        )
     }
 
     // === CONTENT FRAMES ===
     pub fn build_content_header_frame(channel: u16, class_id: u16, body_size: u64) -> Vec<u8> {
-        Self::build_raw_frame(constants::FRAME_CONTENT_HEADER, channel, &[
-            class_id.to_be_bytes().to_vec(),
-            0u16.to_be_bytes().to_vec(), // weight
-            body_size.to_be_bytes().to_vec(),
-            vec![0, 0], // property flags (empty)
-        ].concat())
+        Self::build_raw_frame(
+            constants::FRAME_CONTENT_HEADER,
+            channel,
+            &[
+                class_id.to_be_bytes().to_vec(),
+                0u16.to_be_bytes().to_vec(), // weight
+                body_size.to_be_bytes().to_vec(),
+                vec![0, 0], // property flags (empty)
+            ]
+            .concat(),
+        )
     }
 
     pub fn build_content_body_frame(channel: u16, body: &[u8]) -> Vec<u8> {
@@ -822,13 +1031,11 @@ impl AmqpLib {
     // === PROTOCOL PARSERS ===
     pub fn parse_connection_tune(args: &[u8]) -> Result<ConnectionParams> {
         match args {
-            [ch_hi, ch_lo, fr_a, fr_b, fr_c, fr_d, hb_hi, hb_lo, ..] => {
-                Ok(ConnectionParams {
-                    channel_max: u16::from_be_bytes([*ch_hi, *ch_lo]),
-                    frame_max: u32::from_be_bytes([*fr_a, *fr_b, *fr_c, *fr_d]),
-                    heartbeat: u16::from_be_bytes([*hb_hi, *hb_lo]),
-                })
-            }
+            [ch_hi, ch_lo, fr_a, fr_b, fr_c, fr_d, hb_hi, hb_lo, ..] => Ok(ConnectionParams {
+                channel_max: u16::from_be_bytes([*ch_hi, *ch_lo]),
+                frame_max: u32::from_be_bytes([*fr_a, *fr_b, *fr_c, *fr_d]),
+                heartbeat: u16::from_be_bytes([*hb_hi, *hb_lo]),
+            }),
             _ => Err(AmqpError::Protocol("Invalid Connection.Tune args".into())),
         }
     }
@@ -852,9 +1059,16 @@ impl AmqpLib {
         heartbeat_state: &mut HeartbeatState,
         log_config: &LogConfig,
     ) -> Result<Vec<u8>> {
-        log_debug(log_config, &format!("Sending frame and expecting {}.{}", expected_class, expected_method));
+        log_debug(
+            log_config,
+            &format!(
+                "Sending frame and expecting {}.{}",
+                expected_class, expected_method
+            ),
+        );
         Self::send_frame_with_heartbeat(stream, frame, heartbeat_state, log_config).await?;
-        let received_frame = Self::receive_frame_with_heartbeat(stream, heartbeat_state, log_config).await?;
+        let received_frame =
+            Self::receive_frame_with_heartbeat(stream, heartbeat_state, log_config).await?;
         let (frame_type, _channel, payload) = Self::parse_frame(&received_frame)?;
 
         if frame_type != constants::FRAME_METHOD {
@@ -865,7 +1079,8 @@ impl AmqpLib {
 
         if class != expected_class || method != expected_method {
             return Err(AmqpError::Protocol(format!(
-                "Expected {}.{}, got {}.{}", expected_class, expected_method, class, method
+                "Expected {}.{}, got {}.{}",
+                expected_class, expected_method, class, method
             )));
         }
 
@@ -900,12 +1115,27 @@ impl MessageStats {
 
     pub fn print_summary(&self, log_config: &LogConfig) {
         log_info(log_config, "=== Message Statistics ===");
-        log_info(log_config, &format!("Messages sent: {}", self.messages_sent));
-        log_info(log_config, &format!("Messages received: {}", self.messages_received));
+        log_info(
+            log_config,
+            &format!("Messages sent: {}", self.messages_sent),
+        );
+        log_info(
+            log_config,
+            &format!("Messages received: {}", self.messages_received),
+        );
         log_info(log_config, &format!("Bytes sent: {}", self.bytes_sent));
-        log_info(log_config, &format!("Bytes received: {}", self.bytes_received));
-        log_info(log_config, &format!("Messages validated: {}", self.messages_validated));
-        log_info(log_config, &format!("Validation failures: {}", self.validation_failures));
+        log_info(
+            log_config,
+            &format!("Bytes received: {}", self.bytes_received),
+        );
+        log_info(
+            log_config,
+            &format!("Messages validated: {}", self.messages_validated),
+        );
+        log_info(
+            log_config,
+            &format!("Validation failures: {}", self.validation_failures),
+        );
         log_info(log_config, &format!("Errors: {}", self.errors));
     }
 }
@@ -925,22 +1155,30 @@ pub async fn establish_connection(
     let start_time = Instant::now();
 
     log_info(log_config, &format!("Connecting to {}:{}", host, port));
-    let mut stream = TcpStream::connect((host, port)).await
-        .map_err(|e| AmqpError::Connection(format!("Failed to connect to {}:{}: {}", host, port, e)))?;
+    let mut stream = TcpStream::connect((host, port)).await.map_err(|e| {
+        AmqpError::Connection(format!("Failed to connect to {}:{}: {}", host, port, e))
+    })?;
 
-    let server_addr = stream.peer_addr()
+    let server_addr = stream
+        .peer_addr()
         .map_err(|e| AmqpError::Connection(format!("Failed to get peer address: {}", e)))?;
 
     // Send AMQP protocol header
     log_debug(log_config, "Sending AMQP protocol header");
-    stream.write_all(constants::AMQP_PROTOCOL_HEADER).await
-        .map_err(|e| AmqpError::Connection(format!("Failed to send AMQP protocol header: {}", e)))?;
+    stream
+        .write_all(constants::AMQP_PROTOCOL_HEADER)
+        .await
+        .map_err(|e| {
+            AmqpError::Connection(format!("Failed to send AMQP protocol header: {}", e))
+        })?;
 
     let mut temp_heartbeat_state = HeartbeatState::new(0);
 
     // Wait for Connection.Start
     log_debug(log_config, "Waiting for Connection.Start");
-    let received_frame = AmqpLib::receive_frame_with_heartbeat(&mut stream, &mut temp_heartbeat_state, log_config).await?;
+    let received_frame =
+        AmqpLib::receive_frame_with_heartbeat(&mut stream, &mut temp_heartbeat_state, log_config)
+            .await?;
     let (frame_type, _channel, payload) = AmqpLib::parse_frame(&received_frame)?;
 
     if frame_type != constants::FRAME_METHOD {
@@ -961,7 +1199,8 @@ pub async fn establish_connection(
         constants::CONNECTION_TUNE,
         &mut temp_heartbeat_state,
         log_config,
-    ).await?;
+    )
+    .await?;
 
     let server_params = AmqpLib::parse_connection_tune(&tune_args)?;
 
@@ -972,15 +1211,25 @@ pub async fn establish_connection(
         heartbeat: server_params.heartbeat.min(heartbeat_interval),
     };
 
-    log_debug(log_config, &format!("Negotiated params: channel_max={}, frame_max={}, heartbeat={}",
-        negotiated_params.channel_max, negotiated_params.frame_max, negotiated_params.heartbeat));
+    log_debug(
+        log_config,
+        &format!(
+            "Negotiated params: channel_max={}, frame_max={}, heartbeat={}",
+            negotiated_params.channel_max, negotiated_params.frame_max, negotiated_params.heartbeat
+        ),
+    );
 
     // Send Connection.TuneOk
-    AmqpLib::send_frame(&mut stream, AmqpLib::build_connection_tune_ok_frame(
-        negotiated_params.channel_max,
-        negotiated_params.frame_max,
-        negotiated_params.heartbeat,
-    ), log_config).await?;
+    AmqpLib::send_frame(
+        &mut stream,
+        AmqpLib::build_connection_tune_ok_frame(
+            negotiated_params.channel_max,
+            negotiated_params.frame_max,
+            negotiated_params.heartbeat,
+        ),
+        log_config,
+    )
+    .await?;
 
     // Initialize heartbeat with negotiated interval
     let mut heartbeat_state = HeartbeatState::new(negotiated_params.heartbeat);
@@ -994,9 +1243,13 @@ pub async fn establish_connection(
         constants::CONNECTION_OPEN_OK,
         &mut heartbeat_state,
         log_config,
-    ).await?;
+    )
+    .await?;
 
-    log_info(log_config, &format!("Connected to {} as {}", server_addr, client_id));
+    log_info(
+        log_config,
+        &format!("Connected to {} as {}", server_addr, client_id),
+    );
 
     Ok((
         stream,
@@ -1026,7 +1279,8 @@ pub async fn open_channel(
         constants::CHANNEL_OPEN_OK,
         heartbeat_state,
         log_config,
-    ).await?;
+    )
+    .await?;
 
     log_debug(log_config, &format!("Channel {} opened", channel_id));
     Ok(channel_id)
@@ -1044,16 +1298,31 @@ pub async fn declare_exchange(
     heartbeat_state: &mut HeartbeatState,
     log_config: &LogConfig,
 ) -> Result<()> {
-    log_debug(log_config, &format!("Declaring exchange '{}' of type '{}'", exchange, exchange_type.wire_name()));
+    log_debug(
+        log_config,
+        &format!(
+            "Declaring exchange '{}' of type '{}'",
+            exchange,
+            exchange_type.wire_name()
+        ),
+    );
 
     let _ = AmqpLib::send_and_expect_response(
         stream,
-        AmqpLib::build_exchange_declare_frame(channel_id, exchange, exchange_type.wire_name(), durable, auto_delete, internal),
+        AmqpLib::build_exchange_declare_frame(
+            channel_id,
+            exchange,
+            exchange_type.wire_name(),
+            durable,
+            auto_delete,
+            internal,
+        ),
         constants::EXCHANGE_CLASS,
         constants::EXCHANGE_DECLARE_OK,
         heartbeat_state,
         log_config,
-    ).await?;
+    )
+    .await?;
 
     Ok(())
 }
@@ -1078,7 +1347,8 @@ pub async fn declare_queue(
         constants::QUEUE_DECLARE_OK,
         heartbeat_state,
         log_config,
-    ).await?;
+    )
+    .await?;
 
     let (queue_name, _) = AmqpLib::parse_short_string(&response)?;
     log_debug(log_config, &format!("Queue declared: '{}'", queue_name));
@@ -1094,7 +1364,13 @@ pub async fn bind_queue(
     heartbeat_state: &mut HeartbeatState,
     log_config: &LogConfig,
 ) -> Result<()> {
-    log_debug(log_config, &format!("Binding queue '{}' to exchange '{}' with key '{}'", queue, exchange, routing_key));
+    log_debug(
+        log_config,
+        &format!(
+            "Binding queue '{}' to exchange '{}' with key '{}'",
+            queue, exchange, routing_key
+        ),
+    );
 
     let _ = AmqpLib::send_and_expect_response(
         stream,
@@ -1103,7 +1379,8 @@ pub async fn bind_queue(
         constants::QUEUE_BIND_OK,
         heartbeat_state,
         log_config,
-    ).await?;
+    )
+    .await?;
 
     Ok(())
 }
@@ -1120,7 +1397,13 @@ pub async fn publish_message(
     heartbeat_state: &mut HeartbeatState,
     log_config: &LogConfig,
 ) -> Result<PublishResult> {
-    log_trace(log_config, &format!("Publishing to exchange '{}' with key '{}'", exchange, routing_key));
+    log_trace(
+        log_config,
+        &format!(
+            "Publishing to exchange '{}' with key '{}'",
+            exchange, routing_key
+        ),
+    );
 
     // Send Basic.Publish
     let publish_bytes = AmqpLib::send_frame_with_heartbeat(
@@ -1128,7 +1411,8 @@ pub async fn publish_message(
         AmqpLib::build_basic_publish_frame(channel_id, exchange, routing_key, mandatory, immediate),
         heartbeat_state,
         log_config,
-    ).await?;
+    )
+    .await?;
 
     // Send Content Header
     let header_bytes = AmqpLib::send_frame_with_heartbeat(
@@ -1136,7 +1420,8 @@ pub async fn publish_message(
         AmqpLib::build_content_header_frame(channel_id, constants::BASIC_CLASS, body.len() as u64),
         heartbeat_state,
         log_config,
-    ).await?;
+    )
+    .await?;
 
     // Send Content Body
     let body_bytes = AmqpLib::send_frame_with_heartbeat(
@@ -1144,7 +1429,8 @@ pub async fn publish_message(
         AmqpLib::build_content_body_frame(channel_id, body),
         heartbeat_state,
         log_config,
-    ).await?;
+    )
+    .await?;
 
     let total_bytes = publish_bytes + header_bytes + body_bytes;
 
@@ -1167,16 +1453,27 @@ pub async fn start_consuming(
     heartbeat_state: &mut HeartbeatState,
     log_config: &LogConfig,
 ) -> Result<ConsumeResult> {
-    log_debug(log_config, &format!("Starting consumer '{}' on queue '{}'", consumer_tag, queue));
+    log_debug(
+        log_config,
+        &format!("Starting consumer '{}' on queue '{}'", consumer_tag, queue),
+    );
 
     let response = AmqpLib::send_and_expect_response(
         stream,
-        AmqpLib::build_basic_consume_frame(channel_id, queue, consumer_tag, no_local, no_ack, exclusive),
+        AmqpLib::build_basic_consume_frame(
+            channel_id,
+            queue,
+            consumer_tag,
+            no_local,
+            no_ack,
+            exclusive,
+        ),
         constants::BASIC_CLASS,
         constants::BASIC_CONSUME_OK,
         heartbeat_state,
         log_config,
-    ).await?;
+    )
+    .await?;
 
     let (actual_consumer_tag, _) = AmqpLib::parse_short_string(&response)?;
 
@@ -1216,8 +1513,11 @@ pub async fn receive_message(
                 };
 
                 // Receive Content Header
-                let header_frame = AmqpLib::receive_frame_with_heartbeat(stream, heartbeat_state, log_config).await?;
-                let (header_type, _header_channel, header_payload) = AmqpLib::parse_frame(&header_frame)?;
+                let header_frame =
+                    AmqpLib::receive_frame_with_heartbeat(stream, heartbeat_state, log_config)
+                        .await?;
+                let (header_type, _header_channel, header_payload) =
+                    AmqpLib::parse_frame(&header_frame)?;
 
                 if header_type != constants::FRAME_CONTENT_HEADER {
                     return Err(AmqpError::Protocol("Expected content header".into()));
@@ -1234,7 +1534,9 @@ pub async fn receive_message(
                 };
 
                 // Receive Content Body
-                let body_frame = AmqpLib::receive_frame_with_heartbeat(stream, heartbeat_state, log_config).await?;
+                let body_frame =
+                    AmqpLib::receive_frame_with_heartbeat(stream, heartbeat_state, log_config)
+                        .await?;
                 let (body_type, _body_channel, body_payload) = AmqpLib::parse_frame(&body_frame)?;
 
                 if body_type != constants::FRAME_CONTENT_BODY {
@@ -1247,7 +1549,10 @@ pub async fn receive_message(
                     body: body_payload.to_vec(),
                 };
 
-                log_trace(log_config, &format!("Received message with delivery tag {}", delivery_tag));
+                log_trace(
+                    log_config,
+                    &format!("Received message with delivery tag {}", delivery_tag),
+                );
 
                 Ok(Some(message))
             } else {
@@ -1268,13 +1573,17 @@ pub async fn ack_message(
     heartbeat_state: &mut HeartbeatState,
     log_config: &LogConfig,
 ) -> Result<usize> {
-    log_trace(log_config, &format!("Acknowledging delivery tag {}", delivery_tag));
+    log_trace(
+        log_config,
+        &format!("Acknowledging delivery tag {}", delivery_tag),
+    );
     let bytes_sent = AmqpLib::send_frame_with_heartbeat(
         stream,
         AmqpLib::build_basic_ack_frame(channel_id, delivery_tag, multiple),
         heartbeat_state,
         log_config,
-    ).await?;
+    )
+    .await?;
     Ok(bytes_sent)
 }
 
@@ -1303,7 +1612,8 @@ pub async fn run_producer_workflow(
         config.internal,
         &mut heartbeat_state,
         log_config,
-    ).await?;
+    )
+    .await?;
 
     let queue_name = declare_queue(
         &mut stream,
@@ -1314,9 +1624,19 @@ pub async fn run_producer_workflow(
         config.auto_delete,
         &mut heartbeat_state,
         log_config,
-    ).await?;
+    )
+    .await?;
 
-    bind_queue(&mut stream, channel_id, &queue_name, &config.exchange, &config.routing_key, &mut heartbeat_state, log_config).await?;
+    bind_queue(
+        &mut stream,
+        channel_id,
+        &queue_name,
+        &config.exchange,
+        &config.routing_key,
+        &mut heartbeat_state,
+        log_config,
+    )
+    .await?;
 
     let message_source = MessageSource {
         prefix: format!("Message from {}", connection_result.client_id),
@@ -1328,7 +1648,13 @@ pub async fn run_producer_workflow(
     match config.count {
         Some(count) => {
             // Test mode - send specific number of messages
-            log_info(log_config, &format!("Producer {} sending {} messages", connection_result.client_id, count));
+            log_info(
+                log_config,
+                &format!(
+                    "Producer {} sending {} messages",
+                    connection_result.client_id, count
+                ),
+            );
 
             for i in 1..=count {
                 let message = message_source.generate_message(i);
@@ -1343,19 +1669,30 @@ pub async fn run_producer_workflow(
                     false,
                     &mut heartbeat_state,
                     log_config,
-                ).await {
+                )
+                .await
+                {
                     Ok(publish_result) => {
                         stats.messages_sent += 1;
                         stats.bytes_sent += publish_result.bytes_sent;
                         final_delivery_tag = publish_result.delivery_tag;
 
                         if i % 100 == 0 {
-                            log_debug(log_config, &format!("Producer {} sent {} messages", connection_result.client_id, i));
+                            log_debug(
+                                log_config,
+                                &format!(
+                                    "Producer {} sent {} messages",
+                                    connection_result.client_id, i
+                                ),
+                            );
                         }
                     }
                     Err(e) => {
                         stats.errors += 1;
-                        log_error(log_config, &format!("Failed to publish message {}: {}", i, e));
+                        log_error(
+                            log_config,
+                            &format!("Failed to publish message {}: {}", i, e),
+                        );
                         return Err(e);
                     }
                 }
@@ -1365,7 +1702,13 @@ pub async fn run_producer_workflow(
                 }
             }
 
-            log_info(log_config, &format!("Producer {} successfully sent all {} messages", connection_result.client_id, count));
+            log_info(
+                log_config,
+                &format!(
+                    "Producer {} successfully sent all {} messages",
+                    connection_result.client_id, count
+                ),
+            );
         }
         None => {
             // Interactive mode
@@ -1373,7 +1716,13 @@ pub async fn run_producer_workflow(
             let mut reader = BufReader::new(stdin);
             let mut line = String::new();
 
-            log_info(log_config, &format!("Producer {} ready. Type messages (Ctrl+C to quit):", connection_result.client_id));
+            log_info(
+                log_config,
+                &format!(
+                    "Producer {} ready. Type messages (Ctrl+C to quit):",
+                    connection_result.client_id
+                ),
+            );
 
             let mut seq = 1;
             loop {
@@ -1401,7 +1750,9 @@ pub async fn run_producer_workflow(
                                 false,
                                 &mut heartbeat_state,
                                 log_config,
-                            ).await {
+                            )
+                            .await
+                            {
                                 Ok(publish_result) => {
                                     stats.messages_sent += 1;
                                     stats.bytes_sent += publish_result.bytes_sent;
@@ -1458,7 +1809,8 @@ pub async fn run_consumer_workflow(
         constants::BASIC_QOS_OK,
         &mut heartbeat_state,
         log_config,
-    ).await?;
+    )
+    .await?;
 
     // Start consuming
     let consume_result = start_consuming(
@@ -1471,7 +1823,8 @@ pub async fn run_consumer_workflow(
         false,
         &mut heartbeat_state,
         log_config,
-    ).await?;
+    )
+    .await?;
 
     let message_drain = MessageDrain {
         expected_prefix: if config.validate_messages {
@@ -1483,15 +1836,26 @@ pub async fn run_consumer_workflow(
         last_sequence: None,
     };
 
-    log_info(log_config, &format!("Consumer {} ready with tag '{}'. Waiting for messages...",
-        connection_result.client_id, consume_result.consumer_tag));
+    log_info(
+        log_config,
+        &format!(
+            "Consumer {} ready with tag '{}'. Waiting for messages...",
+            connection_result.client_id, consume_result.consumer_tag
+        ),
+    );
 
     let mut final_delivery_tag = None;
 
     match config.count {
         Some(target_count) => {
             // Test mode - receive specific number of messages
-            log_info(log_config, &format!("Consumer {} waiting for {} messages", connection_result.client_id, target_count));
+            log_info(
+                log_config,
+                &format!(
+                    "Consumer {} waiting for {} messages",
+                    connection_result.client_id, target_count
+                ),
+            );
 
             let mut received_count = 0;
 
@@ -1509,34 +1873,63 @@ pub async fn run_consumer_workflow(
                                 Ok(validation) => {
                                     if validation.valid {
                                         stats.messages_validated += 1;
-                                        log_trace(log_config, &format!("Message {} validated", received_count));
+                                        log_trace(
+                                            log_config,
+                                            &format!("Message {} validated", received_count),
+                                        );
                                     } else {
                                         stats.validation_failures += 1;
-                                        log_error(log_config, &format!("Message {} validation failed: {}",
-                                            received_count, validation.error.unwrap_or_default()));
+                                        log_error(
+                                            log_config,
+                                            &format!(
+                                                "Message {} validation failed: {}",
+                                                received_count,
+                                                validation.error.unwrap_or_default()
+                                            ),
+                                        );
                                     }
                                 }
                                 Err(e) => {
                                     stats.validation_failures += 1;
-                                    log_error(log_config, &format!("Message validation error: {}", e));
+                                    log_error(
+                                        log_config,
+                                        &format!("Message validation error: {}", e),
+                                    );
                                 }
                             }
                         }
 
                         if received_count % 100 == 0 {
-                            log_debug(log_config, &format!("Consumer {} received {} messages",
-                                connection_result.client_id, received_count));
+                            log_debug(
+                                log_config,
+                                &format!(
+                                    "Consumer {} received {} messages",
+                                    connection_result.client_id, received_count
+                                ),
+                            );
                         }
 
                         // Acknowledge message if not in no-ack mode
                         if !config.no_ack {
                             match config.ack_mode {
                                 AckMode::Manual | AckMode::Auto => {
-                                    match ack_message(&mut stream, channel_id, message.delivery_info.delivery_tag, false, &mut heartbeat_state, log_config).await {
-                                        Ok(_) => {},
+                                    match ack_message(
+                                        &mut stream,
+                                        channel_id,
+                                        message.delivery_info.delivery_tag,
+                                        false,
+                                        &mut heartbeat_state,
+                                        log_config,
+                                    )
+                                    .await
+                                    {
+                                        Ok(_) => {}
                                         Err(e) => {
                                             stats.errors += 1;
-                                            log_error(log_config, &format!("Failed to ack message: {}", e));
+                                            log_error(
+                                                log_config,
+                                                &format!("Failed to ack message: {}", e),
+                                            );
                                         }
                                     }
                                 }
@@ -1554,12 +1947,20 @@ pub async fn run_consumer_workflow(
                 }
             }
 
-            log_info(log_config, &format!("Consumer {} successfully received all {} messages",
-                connection_result.client_id, target_count));
+            log_info(
+                log_config,
+                &format!(
+                    "Consumer {} successfully received all {} messages",
+                    connection_result.client_id, target_count
+                ),
+            );
         }
         None => {
             // Interactive mode - receive until interrupted
-            log_info(log_config, "Consumer in interactive mode. Press Ctrl+C to stop.");
+            log_info(
+                log_config,
+                "Consumer in interactive mode. Press Ctrl+C to stop.",
+            );
 
             loop {
                 match receive_message(&mut stream, &mut heartbeat_state, log_config).await {
@@ -1568,13 +1969,28 @@ pub async fn run_consumer_workflow(
                         stats.bytes_received += message.body.len();
                         final_delivery_tag = Some(message.delivery_info.delivery_tag);
 
-                        log_info(log_config, &format!("Received message {}: {}",
-                            stats.messages_received, String::from_utf8_lossy(&message.body)));
+                        log_info(
+                            log_config,
+                            &format!(
+                                "Received message {}: {}",
+                                stats.messages_received,
+                                String::from_utf8_lossy(&message.body)
+                            ),
+                        );
 
                         // Acknowledge message if not in no-ack mode
                         if !config.no_ack {
-                            match ack_message(&mut stream, channel_id, message.delivery_info.delivery_tag, false, &mut heartbeat_state, log_config).await {
-                                Ok(_) => {},
+                            match ack_message(
+                                &mut stream,
+                                channel_id,
+                                message.delivery_info.delivery_tag,
+                                false,
+                                &mut heartbeat_state,
+                                log_config,
+                            )
+                            .await
+                            {
+                                Ok(_) => {}
                                 Err(e) => {
                                     stats.errors += 1;
                                     log_error(log_config, &format!("Failed to ack message: {}", e));
@@ -1643,34 +2059,60 @@ struct VirtualHost {
     bindings: Vec<Binding>,
 }
 
-// Server shared state (minimal, only what needs to be shared)
-#[derive(Debug, Clone)]
-struct ServerSharedState {
-    virtual_hosts: HashMap<String, VirtualHost>,
-    active_connections: usize,
+#[derive(Debug)]
+struct ServerConnection {
+    id: String,
+    stream: TcpStream,
+    addr: SocketAddr,
+    state: ConnectionState,
+    heartbeat_state: HeartbeatState,
+    channels: HashMap<u16, ChannelState>,
+    params: ConnectionParams,
+    vhost: String,
+    username: String,
 }
 
 pub struct AmqpServer {
     server_id: String,
     listener: TcpListener,
+    connections: HashMap<String, ServerConnection>,
     limits: ResourceLimits,
+    stats: MessageStats,
+    virtual_hosts: HashMap<String, VirtualHost>,
     log_config: LogConfig,
 }
 
 impl AmqpServer {
-    pub async fn bind(server_id: String, host: &str, port: u16, limits: ResourceLimits, log_config: LogConfig) -> Result<ServerStartResult> {
-        log_info(&log_config, &format!("Binding server {} to {}:{}", server_id, host, port));
+    pub async fn bind(
+        server_id: String,
+        host: &str,
+        port: u16,
+        limits: ResourceLimits,
+        log_config: LogConfig,
+    ) -> Result<ServerStartResult> {
+        log_info(
+            &log_config,
+            &format!("Binding server {} to {}:{}", server_id, host, port),
+        );
 
-        let listener = TcpListener::bind((host, port)).await
-            .map_err(|e| AmqpError::Connection(format!("Failed to bind to {}:{}: {}", host, port, e)))?;
+        let listener = TcpListener::bind((host, port)).await.map_err(|e| {
+            AmqpError::Connection(format!("Failed to bind to {}:{}: {}", host, port, e))
+        })?;
 
-        let bind_address = listener.local_addr()
+        let bind_address = listener
+            .local_addr()
             .map_err(|e| AmqpError::Connection(format!("Failed to get local address: {}", e)))?;
+
+        let mut virtual_hosts = HashMap::new();
+        virtual_hosts.insert("/".to_string(), Self::create_default_vhost("/"));
 
         let _server = Self {
             server_id: server_id.clone(),
             listener,
+            connections: HashMap::new(),
             limits: limits.clone(),
+            stats: MessageStats::new(),
+            virtual_hosts,
             log_config,
         };
 
@@ -1685,13 +2127,16 @@ impl AmqpServer {
         let mut exchanges = HashMap::new();
 
         // Create default exchange
-        exchanges.insert("".to_string(), Exchange {
-            name: "".to_string(),
-            exchange_type: "direct".to_string(),
-            durable: true,
-            auto_delete: false,
-            internal: false,
-        });
+        exchanges.insert(
+            "".to_string(),
+            Exchange {
+                name: "".to_string(),
+                exchange_type: "direct".to_string(),
+                durable: true,
+                auto_delete: false,
+                internal: false,
+            },
+        );
 
         VirtualHost {
             name: name.to_string(),
@@ -1702,443 +2147,164 @@ impl AmqpServer {
     }
 
     pub async fn run(&mut self) -> Result<()> {
-        log_info(&self.log_config, &format!("Server {} listening on {:?}", self.server_id, self.listener.local_addr()));
-
-        // Create shared state with Arc<Mutex>
-        let shared_state = std::sync::Arc::new(tokio::sync::Mutex::new(ServerSharedState {
-            virtual_hosts: {
-                let mut vh = HashMap::new();
-                vh.insert("/".to_string(), Self::create_default_vhost("/"));
-                vh
-            },
-            active_connections: 0,
-        }));
+        log_info(
+            &self.log_config,
+            &format!(
+                "Server {} listening on {:?}",
+                self.server_id,
+                self.listener.local_addr()
+            ),
+        );
 
         loop {
             // Accept new connections
             match self.listener.accept().await {
                 Ok((stream, addr)) => {
-                    let conn_id = format!("conn-{}-{}", addr, Uuid::new_v4());
-
-                    // Check connection limit
-                    {
-                        let mut state = shared_state.lock().await;
-                        if state.active_connections >= self.limits.max_connections {
-                            log_error(&self.log_config, &format!("Server {} rejected connection from {} - max connections reached",
-                                    self.server_id, addr));
-                            continue;
-                        }
-                        state.active_connections += 1;
+                    if self.connections.len() >= self.limits.max_connections {
+                        log_error(
+                            &self.log_config,
+                            &format!(
+                                "Server {} rejected connection from {} - max connections reached",
+                                self.server_id, addr
+                            ),
+                        );
+                        continue;
                     }
 
-                    log_info(&self.log_config, &format!("Server {} accepted connection {} from {}",
-                           self.server_id, conn_id, addr));
+                    let conn_id = format!("conn-{}-{}", addr, Uuid::new_v4());
+                    log_info(
+                        &self.log_config,
+                        &format!(
+                            "Server {} accepted connection {} from {}",
+                            self.server_id, conn_id, addr
+                        ),
+                    );
 
-                    // Spawn independent coroutine for this connection
-                    let server_id = self.server_id.clone();
-                    let limits = self.limits.clone();
-                    let log_config = self.log_config.clone();
-                    let shared_state_clone = shared_state.clone();
+                    let connection = ServerConnection {
+                        id: conn_id.clone(),
+                        stream,
+                        addr,
+                        state: ConnectionState::Initial,
+                        heartbeat_state: HeartbeatState::new(0),
+                        channels: HashMap::new(),
+                        params: ConnectionParams::default(),
+                        vhost: "/".to_string(),
+                        username: "guest".to_string(),
+                    };
 
-                    tokio::spawn(async move {
-                        let result = handle_connection(
-                            conn_id.clone(),
-                            stream,
-                            addr,
-                            server_id,
-                            limits,
-                            log_config.clone(),
-                            shared_state_clone.clone(),
-                        ).await;
-
-                        // Decrement connection count on exit
-                        {
-                            let mut state = shared_state_clone.lock().await;
-                            state.active_connections -= 1;
-                        }
-
-                        match result {
-                            Ok(_) => log_info(&log_config, &format!("Connection {} closed normally", conn_id)),
-                            Err(e) => log_error(&log_config, &format!("Connection {} error: {}", conn_id, e)),
-                        }
-                    });
+                    self.connections.insert(conn_id.clone(), connection);
                 }
                 Err(e) => {
-                    log_error(&self.log_config, &format!("Server {} accept error: {}", self.server_id, e));
+                    log_error(
+                        &self.log_config,
+                        &format!("Server {} accept error: {}", self.server_id, e),
+                    );
                 }
             }
+
+            // Handle existing connections
+            self.handle_connections().await?;
         }
     }
-}
 
-// Connection handler - runs independently for each connection
-async fn handle_connection(
-    conn_id: String,
-    mut stream: TcpStream,
-    addr: SocketAddr,
-    server_id: String,
-    limits: ResourceLimits,
-    log_config: LogConfig,
-    shared_state: std::sync::Arc<tokio::sync::Mutex<ServerSharedState>>,
-) -> Result<()> {
-    // Connection-local state
-    let mut conn_state = ConnectionState::Initial;
-    let mut heartbeat_state = HeartbeatState::new(0);
-    let mut channels: HashMap<u16, ChannelState> = HashMap::new();
-    let mut params = ConnectionParams::default();
-    let mut vhost = "/".to_string();
-    let mut username = "guest".to_string();
+    async fn handle_connections(&mut self) -> Result<()> {
+        let mut connections_to_remove = Vec::new();
+        let connection_ids: Vec<String> = self.connections.keys().cloned().collect();
 
-    // Wait for AMQP protocol header
-    let mut header = [0u8; 8];
-    stream.read_exact(&mut header).await.map_err(AmqpError::Io)?;
-
-    if &header != constants::AMQP_PROTOCOL_HEADER {
-        return Err(AmqpError::Protocol("Invalid AMQP protocol header".into()));
-    }
-
-    log_debug(&log_config, &format!("Connection {} received AMQP header", conn_id));
-
-    // Send Connection.Start
-    let start_frame = AmqpLib::build_connection_start_frame();
-    AmqpLib::send_frame(&mut stream, start_frame, &log_config).await?;
-    conn_state = ConnectionState::StartReceived;
-
-    // Main connection loop
-    loop {
-        match AmqpLib::receive_frame_with_heartbeat(&mut stream, &mut heartbeat_state, &log_config).await {
-            Ok(frame) => {
-                let (frame_type, channel, payload) = AmqpLib::parse_frame(&frame)?;
-
-                match frame_type {
-                    constants::FRAME_METHOD => {
-                        let (class, method, args) = AmqpLib::parse_method_frame(payload)?;
-
-                        // Handle method based on current state and method
-                        match (class, method) {
-                            (constants::CONNECTION_CLASS, constants::CONNECTION_START_OK) => {
-                                // Parse authentication (simplified)
-                                // Send Connection.Tune
-                                let tune_frame = AmqpLib::build_connection_tune_frame(
-                                    limits.max_channels_per_connection,
-                                    limits.max_frame_size,
-                                    60
-                                );
-                                AmqpLib::send_frame_with_heartbeat(&mut stream, tune_frame, &mut heartbeat_state, &log_config).await?;
-                                conn_state = ConnectionState::TuneReceived;
-                            }
-
-                            (constants::CONNECTION_CLASS, constants::CONNECTION_TUNE_OK) => {
-                                params = AmqpLib::parse_connection_tune(args)?;
-                                heartbeat_state = HeartbeatState::new(params.heartbeat);
-                                conn_state = ConnectionState::TuneOkSent;
-                            }
-
-                            (constants::CONNECTION_CLASS, constants::CONNECTION_OPEN) => {
-                                let (vhost_name, _) = AmqpLib::parse_short_string(args)?;
-                                vhost = vhost_name;
-
-                                // Send Connection.OpenOk
-                                let open_ok_frame = AmqpLib::build_connection_open_ok_frame();
-                                AmqpLib::send_frame_with_heartbeat(&mut stream, open_ok_frame, &mut heartbeat_state, &log_config).await?;
-                                conn_state = ConnectionState::Open;
-                                log_info(&log_config, &format!("Connection {} opened vhost '{}'", conn_id, vhost));
-                            }
-
-                            (constants::CONNECTION_CLASS, constants::CONNECTION_CLOSE) => {
-                                // Send Connection.CloseOk
-                                let close_ok_frame = AmqpLib::build_method_frame(
-                                    0,
-                                    constants::CONNECTION_CLASS,
-                                    constants::CONNECTION_CLOSE_OK,
-                                    &[]
-                                );
-                                AmqpLib::send_frame(&mut stream, close_ok_frame, &log_config).await?;
-                                return Ok(());
-                            }
-
-                            (constants::CHANNEL_CLASS, constants::CHANNEL_OPEN) => {
-                                if channels.len() >= limits.max_channels_per_connection as usize {
-                                    return Err(AmqpError::Resource("Maximum channels per connection exceeded".into()));
-                                }
-
-                                channels.insert(channel, ChannelState::Open);
-
-                                // Send Channel.OpenOk
-                                let channel_ok_frame = AmqpLib::build_channel_open_ok_frame(channel);
-                                AmqpLib::send_frame_with_heartbeat(&mut stream, channel_ok_frame, &mut heartbeat_state, &log_config).await?;
-                                log_debug(&log_config, &format!("Channel {} opened on connection {}", channel, conn_id));
-                            }
-
-                            (constants::CHANNEL_CLASS, constants::CHANNEL_CLOSE) => {
-                                channels.remove(&channel);
-                                // Send Channel.CloseOk
-                                let close_ok_frame = AmqpLib::build_method_frame(
-                                    channel,
-                                    constants::CHANNEL_CLASS,
-                                    constants::CHANNEL_CLOSE_OK,
-                                    &[]
-                                );
-                                AmqpLib::send_frame(&mut stream, close_ok_frame, &log_config).await?;
-                            }
-
-                            (constants::EXCHANGE_CLASS, constants::EXCHANGE_DECLARE) => {
-                                handle_exchange_declare(&mut stream, channel, args, &vhost, &shared_state, &heartbeat_state, &log_config).await?;
-                            }
-
-                            (constants::QUEUE_CLASS, constants::QUEUE_DECLARE) => {
-                                handle_queue_declare(&mut stream, channel, args, &vhost, &shared_state, &heartbeat_state, &log_config).await?;
-                            }
-
-                            (constants::QUEUE_CLASS, constants::QUEUE_BIND) => {
-                                handle_queue_bind(&mut stream, channel, args, &vhost, &shared_state, &heartbeat_state, &log_config).await?;
-                            }
-
-                            (constants::BASIC_CLASS, constants::BASIC_QOS) => {
-                                // Send Basic.QosOk
-                                let qos_ok_frame = AmqpLib::build_basic_qos_ok_frame(channel);
-                                AmqpLib::send_frame_with_heartbeat(&mut stream, qos_ok_frame, &mut heartbeat_state, &log_config).await?;
-                            }
-
-                            (constants::BASIC_CLASS, constants::BASIC_CONSUME) => {
-                                handle_basic_consume(&mut stream, channel, args, &vhost, &shared_state, &heartbeat_state, &log_config).await?;
-                            }
-
-                            (constants::BASIC_CLASS, constants::BASIC_PUBLISH) => {
-                                handle_basic_publish(&mut stream, channel, args, &vhost, &shared_state, &log_config).await?;
-                            }
-
-                            (constants::BASIC_CLASS, constants::BASIC_ACK) => {
-                                log_trace(&log_config, "Received Basic.Ack");
-                            }
-
-                            _ => {
-                                log_debug(&log_config, &format!("Unhandled method {}.{} on channel {}", class, method, channel));
-                            }
+        for conn_id in connection_ids {
+            let should_continue = match self.connections.get_mut(&conn_id) {
+                Some(connection) => {
+                    // The borrow is released at the end of this block
+                    match self.handle_connection_frame(connection).await {
+                        Ok(continue_flag) => continue_flag,
+                        Err(e) => {
+                            log_error(
+                                &self.log_config,
+                                &format!(
+                                    "Server {} connection {} error: {}",
+                                    self.server_id, conn_id, e
+                                ),
+                            );
+                            false
                         }
                     }
-                    constants::FRAME_CONTENT_HEADER => {
-                        log_trace(&log_config, "Received content header frame");
-                    }
-                    constants::FRAME_CONTENT_BODY => {
-                        log_trace(&log_config, "Received content body frame");
-                    }
-                    _ => {
-                        return Err(AmqpError::Protocol(format!("Unhandled frame type: {}", frame_type)));
-                    }
                 }
-            }
-            Err(e) => {
-                log_error(&log_config, &format!("Connection {} frame error: {}", conn_id, e));
-                return Err(e);
-            }
-        }
-    }
-}
+                None => false,
+            };
 
-// Handler functions that work with shared state
-async fn handle_exchange_declare(
-    stream: &mut TcpStream,
-    channel: u16,
-    args: &[u8],
-    vhost: &str,
-    shared_state: &std::sync::Arc<tokio::sync::Mutex<ServerSharedState>>,
-    heartbeat_state: &HeartbeatState,
-    log_config: &LogConfig,
-) -> Result<()> {
-    let mut pos = 2; // Skip reserved
-    let (exchange_name, remaining) = AmqpLib::parse_short_string(&args[pos..])?;
-    pos += 1 + exchange_name.len();
-
-    let (exchange_type, _) = AmqpLib::parse_short_string(&remaining)?;
-
-    let exchange = Exchange {
-        name: exchange_name.clone(),
-        exchange_type,
-        durable: true, // Simplified
-        auto_delete: false,
-        internal: false,
-    };
-
-    // Update shared state
-    {
-        let mut state = shared_state.lock().await;
-        if let Some(vhost_data) = state.virtual_hosts.get_mut(vhost) {
-            vhost_data.exchanges.insert(exchange_name.clone(), exchange);
-            log_debug(log_config, &format!("Exchange '{}' declared in vhost '{}'", exchange_name, vhost));
-        }
-    }
-
-    // Send Exchange.DeclareOk
-    let declare_ok_frame = AmqpLib::build_exchange_declare_ok_frame(channel);
-    AmqpLib::send_frame(stream, declare_ok_frame, log_config).await?;
-
-    Ok(())
-}
-
-async fn handle_queue_declare(
-    stream: &mut TcpStream,
-    channel: u16,
-    args: &[u8],
-    vhost: &str,
-    shared_state: &std::sync::Arc<tokio::sync::Mutex<ServerSharedState>>,
-    heartbeat_state: &HeartbeatState,
-    log_config: &LogConfig,
-) -> Result<()> {
-    let pos = 2; // Skip reserved
-    let (queue_name, _) = AmqpLib::parse_short_string(&args[pos..])?;
-
-    let actual_queue_name = if queue_name.is_empty() {
-        format!("amq.gen-{}", Uuid::new_v4())
-    } else {
-        queue_name
-    };
-
-    let queue = Queue {
-        name: actual_queue_name.clone(),
-        durable: true, // Simplified
-        exclusive: false,
-        auto_delete: false,
-        messages: VecDeque::new(),
-        consumers: Vec::new(),
-    };
-
-    // Update shared state
-    {
-        let mut state = shared_state.lock().await;
-        if let Some(vhost_data) = state.virtual_hosts.get_mut(vhost) {
-            vhost_data.queues.insert(actual_queue_name.clone(), queue);
-            log_debug(log_config, &format!("Queue '{}' declared in vhost '{}'", actual_queue_name, vhost));
-        }
-    }
-
-    // Send Queue.DeclareOk
-    let declare_ok_frame = AmqpLib::build_queue_declare_ok_frame(channel, &actual_queue_name, 0, 0);
-    AmqpLib::send_frame(stream, declare_ok_frame, log_config).await?;
-
-    Ok(())
-}
-
-async fn handle_queue_bind(
-    stream: &mut TcpStream,
-    channel: u16,
-    args: &[u8],
-    vhost: &str,
-    shared_state: &std::sync::Arc<tokio::sync::Mutex<ServerSharedState>>,
-    heartbeat_state: &HeartbeatState,
-    log_config: &LogConfig,
-) -> Result<()> {
-    let mut pos = 2; // Skip reserved
-    let (queue_name, remaining) = AmqpLib::parse_short_string(&args[pos..])?;
-    pos = 1 + queue_name.len();
-
-    let (exchange_name, remaining) = AmqpLib::parse_short_string(&remaining)?;
-    pos = 1 + exchange_name.len();
-
-    let (routing_key, _) = AmqpLib::parse_short_string(&remaining)?;
-
-    let binding = Binding {
-        queue: queue_name.clone(),
-        exchange: exchange_name.clone(),
-        routing_key: routing_key.clone(),
-    };
-
-    // Update shared state
-    {
-        let mut state = shared_state.lock().await;
-        if let Some(vhost_data) = state.virtual_hosts.get_mut(vhost) {
-            vhost_data.bindings.push(binding);
-            log_debug(log_config, &format!("Bound queue '{}' to exchange '{}' with key '{}'",
-                queue_name, exchange_name, routing_key));
-        }
-    }
-
-    // Send Queue.BindOk
-    let bind_ok_frame = AmqpLib::build_queue_bind_ok_frame(channel);
-    AmqpLib::send_frame(stream, bind_ok_frame, log_config).await?;
-
-    Ok(())
-}
-
-async fn handle_basic_consume(
-    stream: &mut TcpStream,
-    channel: u16,
-    args: &[u8],
-    vhost: &str,
-    shared_state: &std::sync::Arc<tokio::sync::Mutex<ServerSharedState>>,
-    heartbeat_state: &HeartbeatState,
-    log_config: &LogConfig,
-) -> Result<()> {
-    let mut pos = 2; // Skip reserved
-    let (queue_name, remaining) = AmqpLib::parse_short_string(&args[pos..])?;
-    pos = 1 + queue_name.len();
-
-    let (consumer_tag, _) = AmqpLib::parse_short_string(&remaining)?;
-
-    let actual_consumer_tag = if consumer_tag.is_empty() {
-        format!("consumer-{}", Uuid::new_v4())
-    } else {
-        consumer_tag
-    };
-
-    // Update shared state
-    {
-        let mut state = shared_state.lock().await;
-        if let Some(vhost_data) = state.virtual_hosts.get_mut(vhost) {
-            if let Some(queue) = vhost_data.queues.get_mut(&queue_name) {
-                queue.consumers.push(actual_consumer_tag.clone());
-                log_debug(log_config, &format!("Consumer '{}' added to queue '{}'", actual_consumer_tag, queue_name));
+            if !should_continue {
+                connections_to_remove.push(conn_id);
             }
         }
+
+        for conn_id in connections_to_remove {
+            self.connections.remove(&conn_id);
+            log_info(
+                &self.log_config,
+                &format!("Server {} removed connection {}", self.server_id, conn_id),
+            );
+        }
+
+        Ok(())
     }
 
-    // Send Basic.ConsumeOk
-    let consume_ok_frame = AmqpLib::build_basic_consume_ok_frame(channel, &actual_consumer_tag);
-    AmqpLib::send_frame(stream, consume_ok_frame, log_config).await?;
+    async fn handle_connection_frame(&mut self, connection: &mut ServerConnection) -> Result<bool> {
+        // Non-blocking frame receive
+        let frame = match tokio::time::timeout(
+            Duration::from_millis(10),
+            AmqpLib::receive_frame_with_heartbeat(
+                &mut connection.stream,
+                &mut connection.heartbeat_state,
+                &self.log_config,
+            ),
+        )
+        .await
+        {
+            Ok(Ok(frame)) => frame,
+            Ok(Err(e)) => return Err(e),
+            Err(_) => return Ok(true), // Timeout, continue
+        };
 
-    Ok(())
-}
+        let (frame_type, channel, payload) = AmqpLib::parse_frame(&frame)?;
 
-async fn handle_basic_publish(
-    stream: &mut TcpStream,
-    channel: u16,
-    args: &[u8],
-    vhost: &str,
-    shared_state: &std::sync::Arc<tokio::sync::Mutex<ServerSharedState>>,
-    log_config: &LogConfig,
-) -> Result<()> {
-    let mut pos = 2; // Skip reserved
-    let (exchange_name, remaining) = AmqpLib::parse_short_string(&args[pos..])?;
-    pos = 1 + exchange_name.len();
-
-    let (routing_key, _) = AmqpLib::parse_short_string(&remaining)?;
-
-    // Find queues bound to this exchange/routing key
-    let matching_queues = {
-        let state = shared_state.lock().await;
-        if let Some(vhost_data) = state.virtual_hosts.get(vhost) {
-            vhost_data.bindings.iter()
-                .filter(|b| b.exchange == exchange_name && b.routing_key == routing_key)
-                .map(|b| b.queue.clone())
-                .collect::<Vec<String>>()
-        } else {
-            Vec::new()
+        match frame_type {
+            constants::FRAME_METHOD => {
+                let (class, method, args) = AmqpLib::parse_method_frame(payload)?;
+                self.handle_method_frame(connection, channel, class, method, args)
+                    .await?;
+            }
+            constants::FRAME_CONTENT_HEADER => {
+                log_trace(&self.log_config, "Received content header frame");
+            }
+            constants::FRAME_CONTENT_BODY => {
+                log_trace(&self.log_config, "Received content body frame");
+            }
+            _ => {
+                return Err(AmqpError::Protocol(format!(
+                    "Unhandled frame type: {}",
+                    frame_type
+                )));
+            }
         }
-    };
 
-    // Note: In a real implementation, we would wait for content header and body frames
-    log_debug(log_config, &format!("Published message to exchange '{}' with routing key '{}', matched {} queues",
-           exchange_name, routing_key, matching_queues.len()));
+        Ok(true)
+    }
 
-    Ok(())
-}method_frame_with_info(&mut self, conn_info: (String, ConnectionState, String, u16, u16, u16, Vec<u8>)) -> Result<()> {
-        let (conn_id, conn_state, vhost, channel, class, method, args) = conn_info;
-
-        log_trace(&self.log_config, &format!("Handling method {}.{} on channel {} for connection {}", class, method, channel, conn_id));
-
-        // Get mutable connection reference
-        let connection = self.connections.get_mut(&conn_id)
-            .ok_or_else(|| AmqpError::Connection("Connection not found".into()))?;
+    async fn handle_method_frame(
+        &mut self,
+        connection: &mut ServerConnection,
+        channel: u16,
+        class: u16,
+        method: u16,
+        args: &[u8],
+    ) -> Result<()> {
+        log_trace(
+            &self.log_config,
+            &format!(
+                "Handling method {}.{} on channel {}",
+                class, method, channel
+            ),
+        );
 
         match (class, method) {
             (constants::CONNECTION_CLASS, constants::CONNECTION_START_OK) => {
@@ -2146,69 +2312,103 @@ async fn handle_basic_publish(
                 let tune_frame = AmqpLib::build_connection_tune_frame(
                     self.limits.max_channels_per_connection,
                     self.limits.max_frame_size,
-                    60
+                    60,
                 );
-                AmqpLib::send_frame_with_heartbeat(&mut connection.stream, tune_frame, &mut connection.heartbeat_state, &self.log_config).await?;
+                AmqpLib::send_frame_with_heartbeat(
+                    &mut connection.stream,
+                    tune_frame,
+                    &mut connection.heartbeat_state,
+                    &self.log_config,
+                )
+                .await?;
                 connection.state = ConnectionState::TuneReceived;
             }
 
             (constants::CONNECTION_CLASS, constants::CONNECTION_TUNE_OK) => {
-                let params = AmqpLib::parse_connection_tune(&args)?;
+                let params = AmqpLib::parse_connection_tune(args)?;
                 connection.params = params;
                 connection.heartbeat_state = HeartbeatState::new(connection.params.heartbeat);
                 connection.state = ConnectionState::TuneOkSent;
             }
 
             (constants::CONNECTION_CLASS, constants::CONNECTION_OPEN) => {
-                let (vhost_name, _) = AmqpLib::parse_short_string(&args)?;
-                connection.vhost = vhost_name.clone();
+                let (vhost, _) = AmqpLib::parse_short_string(args)?;
+                connection.vhost = vhost;
 
                 // Send Connection.OpenOk
                 let open_ok_frame = AmqpLib::build_connection_open_ok_frame();
-                AmqpLib::send_frame_with_heartbeat(&mut connection.stream, open_ok_frame, &mut connection.heartbeat_state, &self.log_config).await?;
+                AmqpLib::send_frame_with_heartbeat(
+                    &mut connection.stream,
+                    open_ok_frame,
+                    &mut connection.heartbeat_state,
+                    &self.log_config,
+                )
+                .await?;
                 connection.state = ConnectionState::Open;
-                log_info(&self.log_config, &format!("Connection {} opened vhost '{}'", conn_id, vhost_name));
+                log_info(
+                    &self.log_config,
+                    &format!(
+                        "Connection {} opened vhost '{}'",
+                        connection.id, connection.vhost
+                    ),
+                );
             }
 
             (constants::CHANNEL_CLASS, constants::CHANNEL_OPEN) => {
                 if connection.channels.len() >= self.limits.max_channels_per_connection as usize {
-                    return Err(AmqpError::Resource("Maximum channels per connection exceeded".into()));
+                    return Err(AmqpError::Resource(
+                        "Maximum channels per connection exceeded".into(),
+                    ));
                 }
 
                 connection.channels.insert(channel, ChannelState::Open);
 
                 // Send Channel.OpenOk
                 let channel_ok_frame = AmqpLib::build_channel_open_ok_frame(channel);
-                AmqpLib::send_frame_with_heartbeat(&mut connection.stream, channel_ok_frame, &mut connection.heartbeat_state, &self.log_config).await?;
-                log_debug(&self.log_config, &format!("Channel {} opened on connection {}", channel, conn_id));
+                AmqpLib::send_frame_with_heartbeat(
+                    &mut connection.stream,
+                    channel_ok_frame,
+                    &mut connection.heartbeat_state,
+                    &self.log_config,
+                )
+                .await?;
+                log_debug(
+                    &self.log_config,
+                    &format!("Channel {} opened on connection {}", channel, connection.id),
+                );
             }
 
             (constants::EXCHANGE_CLASS, constants::EXCHANGE_DECLARE) => {
-                self.handle_exchange_declare(&conn_id, channel, &args).await?;
+                self.handle_exchange_declare(connection, channel, args)
+                    .await?;
             }
 
             (constants::QUEUE_CLASS, constants::QUEUE_DECLARE) => {
-                self.handle_queue_declare(&conn_id, channel, &args).await?;
+                self.handle_queue_declare(connection, channel, args).await?;
             }
 
             (constants::QUEUE_CLASS, constants::QUEUE_BIND) => {
-                self.handle_queue_bind(&conn_id, channel, &args).await?;
+                self.handle_queue_bind(connection, channel, args).await?;
             }
 
             (constants::BASIC_CLASS, constants::BASIC_QOS) => {
                 // Send Basic.QosOk
-                let connection = self.connections.get_mut(&conn_id)
-                    .ok_or_else(|| AmqpError::Connection("Connection not found".into()))?;
                 let qos_ok_frame = AmqpLib::build_basic_qos_ok_frame(channel);
-                AmqpLib::send_frame_with_heartbeat(&mut connection.stream, qos_ok_frame, &mut connection.heartbeat_state, &self.log_config).await?;
+                AmqpLib::send_frame_with_heartbeat(
+                    &mut connection.stream,
+                    qos_ok_frame,
+                    &mut connection.heartbeat_state,
+                    &self.log_config,
+                )
+                .await?;
             }
 
             (constants::BASIC_CLASS, constants::BASIC_CONSUME) => {
-                self.handle_basic_consume(&conn_id, channel, &args).await?;
+                self.handle_basic_consume(connection, channel, args).await?;
             }
 
             (constants::BASIC_CLASS, constants::BASIC_PUBLISH) => {
-                self.handle_basic_publish(&conn_id, channel, &args).await?;
+                self.handle_basic_publish(connection, channel, args).await?;
             }
 
             (constants::BASIC_CLASS, constants::BASIC_ACK) => {
@@ -2216,19 +2416,25 @@ async fn handle_basic_publish(
             }
 
             _ => {
-                log_debug(&self.log_config, &format!("Server {} - Unhandled method {}.{} on channel {}",
-                       self.server_id, class, method, channel));
+                log_debug(
+                    &self.log_config,
+                    &format!(
+                        "Server {} - Unhandled method {}.{} on channel {}",
+                        self.server_id, class, method, channel
+                    ),
+                );
             }
         }
 
         Ok(())
     }
 
-    async fn handle_exchange_declare(&mut self, conn_id: &str, channel: u16, args: &[u8]) -> Result<()> {
-        let connection = self.connections.get(conn_id)
-            .ok_or_else(|| AmqpError::Connection("Connection not found".into()))?;
-        let vhost = connection.vhost.clone();
-
+    async fn handle_exchange_declare(
+        &mut self,
+        connection: &mut ServerConnection,
+        channel: u16,
+        args: &[u8],
+    ) -> Result<()> {
         let mut pos = 2; // Skip reserved
         let (exchange_name, remaining) = AmqpLib::parse_short_string(&args[pos..])?;
         pos += 1 + exchange_name.len();
@@ -2243,25 +2449,36 @@ async fn handle_basic_publish(
             internal: false,
         };
 
-        if let Some(vhost_data) = self.virtual_hosts.get_mut(&vhost) {
-            vhost_data.exchanges.insert(exchange_name.clone(), exchange);
-            log_debug(&self.log_config, &format!("Exchange '{}' declared in vhost '{}'", exchange_name, vhost));
+        if let Some(vhost) = self.virtual_hosts.get_mut(&connection.vhost) {
+            vhost.exchanges.insert(exchange_name.clone(), exchange);
+            log_debug(
+                &self.log_config,
+                &format!(
+                    "Exchange '{}' declared in vhost '{}'",
+                    exchange_name, connection.vhost
+                ),
+            );
         }
 
         // Send Exchange.DeclareOk
-        let connection = self.connections.get_mut(conn_id)
-            .ok_or_else(|| AmqpError::Connection("Connection not found".into()))?;
         let declare_ok_frame = AmqpLib::build_exchange_declare_ok_frame(channel);
-        AmqpLib::send_frame_with_heartbeat(&mut connection.stream, declare_ok_frame, &mut connection.heartbeat_state, &self.log_config).await?;
+        AmqpLib::send_frame_with_heartbeat(
+            &mut connection.stream,
+            declare_ok_frame,
+            &mut connection.heartbeat_state,
+            &self.log_config,
+        )
+        .await?;
 
         Ok(())
     }
 
-    async fn handle_queue_declare(&mut self, conn_id: &str, channel: u16, args: &[u8]) -> Result<()> {
-        let connection = self.connections.get(conn_id)
-            .ok_or_else(|| AmqpError::Connection("Connection not found".into()))?;
-        let vhost = connection.vhost.clone();
-
+    async fn handle_queue_declare(
+        &mut self,
+        connection: &mut ServerConnection,
+        channel: u16,
+        args: &[u8],
+    ) -> Result<()> {
         let pos = 2; // Skip reserved
         let (queue_name, _) = AmqpLib::parse_short_string(&args[pos..])?;
 
@@ -2280,25 +2497,37 @@ async fn handle_basic_publish(
             consumers: Vec::new(),
         };
 
-        if let Some(vhost_data) = self.virtual_hosts.get_mut(&vhost) {
-            vhost_data.queues.insert(actual_queue_name.clone(), queue);
-            log_debug(&self.log_config, &format!("Queue '{}' declared in vhost '{}'", actual_queue_name, vhost));
+        if let Some(vhost) = self.virtual_hosts.get_mut(&connection.vhost) {
+            vhost.queues.insert(actual_queue_name.clone(), queue);
+            log_debug(
+                &self.log_config,
+                &format!(
+                    "Queue '{}' declared in vhost '{}'",
+                    actual_queue_name, connection.vhost
+                ),
+            );
         }
 
         // Send Queue.DeclareOk
-        let connection = self.connections.get_mut(conn_id)
-            .ok_or_else(|| AmqpError::Connection("Connection not found".into()))?;
-        let declare_ok_frame = AmqpLib::build_queue_declare_ok_frame(channel, &actual_queue_name, 0, 0);
-        AmqpLib::send_frame_with_heartbeat(&mut connection.stream, declare_ok_frame, &mut connection.heartbeat_state, &self.log_config).await?;
+        let declare_ok_frame =
+            AmqpLib::build_queue_declare_ok_frame(channel, &actual_queue_name, 0, 0);
+        AmqpLib::send_frame_with_heartbeat(
+            &mut connection.stream,
+            declare_ok_frame,
+            &mut connection.heartbeat_state,
+            &self.log_config,
+        )
+        .await?;
 
         Ok(())
     }
 
-    async fn handle_queue_bind(&mut self, conn_id: &str, channel: u16, args: &[u8]) -> Result<()> {
-        let connection = self.connections.get(conn_id)
-            .ok_or_else(|| AmqpError::Connection("Connection not found".into()))?;
-        let vhost = connection.vhost.clone();
-
+    async fn handle_queue_bind(
+        &mut self,
+        connection: &mut ServerConnection,
+        channel: u16,
+        args: &[u8],
+    ) -> Result<()> {
         let mut pos = 2; // Skip reserved
         let (queue_name, remaining) = AmqpLib::parse_short_string(&args[pos..])?;
         pos = 1 + queue_name.len();
@@ -2314,26 +2543,36 @@ async fn handle_basic_publish(
             routing_key: routing_key.clone(),
         };
 
-        if let Some(vhost_data) = self.virtual_hosts.get_mut(&vhost) {
-            vhost_data.bindings.push(binding);
-            log_debug(&self.log_config, &format!("Bound queue '{}' to exchange '{}' with key '{}'",
-                queue_name, exchange_name, routing_key));
+        if let Some(vhost) = self.virtual_hosts.get_mut(&connection.vhost) {
+            vhost.bindings.push(binding);
+            log_debug(
+                &self.log_config,
+                &format!(
+                    "Bound queue '{}' to exchange '{}' with key '{}'",
+                    queue_name, exchange_name, routing_key
+                ),
+            );
         }
 
         // Send Queue.BindOk
-        let connection = self.connections.get_mut(conn_id)
-            .ok_or_else(|| AmqpError::Connection("Connection not found".into()))?;
         let bind_ok_frame = AmqpLib::build_queue_bind_ok_frame(channel);
-        AmqpLib::send_frame_with_heartbeat(&mut connection.stream, bind_ok_frame, &mut connection.heartbeat_state, &self.log_config).await?;
+        AmqpLib::send_frame_with_heartbeat(
+            &mut connection.stream,
+            bind_ok_frame,
+            &mut connection.heartbeat_state,
+            &self.log_config,
+        )
+        .await?;
 
         Ok(())
     }
 
-    async fn handle_basic_consume(&mut self, conn_id: &str, channel: u16, args: &[u8]) -> Result<()> {
-        let connection = self.connections.get(conn_id)
-            .ok_or_else(|| AmqpError::Connection("Connection not found".into()))?;
-        let vhost = connection.vhost.clone();
-
+    async fn handle_basic_consume(
+        &mut self,
+        connection: &mut ServerConnection,
+        channel: u16,
+        args: &[u8],
+    ) -> Result<()> {
         let mut pos = 2; // Skip reserved
         let (queue_name, remaining) = AmqpLib::parse_short_string(&args[pos..])?;
         pos = 1 + queue_name.len();
@@ -2347,65 +2586,38 @@ async fn handle_basic_publish(
         };
 
         // Add consumer to queue
-        if let Some(vhost_data) = self.virtual_hosts.get_mut(&vhost) {
-            if let Some(queue) = vhost_data.queues.get_mut(&queue_name) {
-                queue.consumers.push(actual_consumer_tag.clone());
-                log_debug(&self.log_config, &format!("Consumer '{}' added to queue '{}'", actual_consumer_tag, queue_name));
-            }
-        }
-
-        // Send Basic.ConsumeOk
-        let connection = self.connections.get_mut(conn_id)
-            .ok_or_else(|| AmqpError::Connection("Connection not found".into()))?;
-        let consume_ok_frame = AmqpLib::build_basic_consume_ok_frame(channel, &actual_consumer_tag);
-        AmqpLib::send_frame_with_heartbeat(&mut connection.stream, consume_ok_frame, &mut connection.heartbeat_state, &self.log_config).await?;
-
-        Ok(())
-    }
-
-    async fn handle_basic_publish(&mut self, conn_id: &str, _channel: u16, args: &[u8]) -> Result<()> {
-        let connection = self.connections.get(conn_id)
-            .ok_or_else(|| AmqpError::Connection("Connection not found".into()))?;
-        let vhost = connection.vhost.clone();
-
-        let mut pos = 2; // Skip reserved
-        let (exchange_name, remaining) = AmqpLib::parse_short_string(&args[pos..])?;
-        pos = 1 + exchange_name.len();
-
-        let (routing_key, _) = AmqpLib::parse_short_string(&remaining)?;
-
-        // Find queues bound to this exchange/routing key
-        let matching_queues = if let Some(vhost_data) = self.virtual_hosts.get(&vhost) {
-            vhost_data.bindings.iter()
-                .filter(|b| b.exchange == exchange_name && b.routing_key == routing_key)
-                .map(|b| b.queue.clone())
-                .collect::<Vec<String>>()
-        } else {
-            Vec::new()
-        };
-
-        // Note: In a real implementation, we would wait for content header and body frames
-        log_debug(&self.log_config, &format!("Server {} published message to exchange '{}' with routing key '{}', matched {} queues",
-               self.server_id, exchange_name, routing_key, matching_queues.len()));
-
-        self.stats.messages_received += 1;
-
-        Ok(())
-    } {
+        if let Some(vhost) = self.virtual_hosts.get_mut(&connection.vhost) {
             if let Some(queue) = vhost.queues.get_mut(&queue_name) {
                 queue.consumers.push(actual_consumer_tag.clone());
-                log_debug(&self.log_config, &format!("Consumer '{}' added to queue '{}'", actual_consumer_tag, queue_name));
+                log_debug(
+                    &self.log_config,
+                    &format!(
+                        "Consumer '{}' added to queue '{}'",
+                        actual_consumer_tag, queue_name
+                    ),
+                );
             }
         }
 
         // Send Basic.ConsumeOk
         let consume_ok_frame = AmqpLib::build_basic_consume_ok_frame(channel, &actual_consumer_tag);
-        AmqpLib::send_frame_with_heartbeat(&mut connection.stream, consume_ok_frame, &mut connection.heartbeat_state, &self.log_config).await?;
+        AmqpLib::send_frame_with_heartbeat(
+            &mut connection.stream,
+            consume_ok_frame,
+            &mut connection.heartbeat_state,
+            &self.log_config,
+        )
+        .await?;
 
         Ok(())
     }
 
-    async fn handle_basic_publish(&mut self, connection: &mut ServerConnection, _channel: u16, args: &[u8]) -> Result<()> {
+    async fn handle_basic_publish(
+        &mut self,
+        connection: &mut ServerConnection,
+        _channel: u16,
+        args: &[u8],
+    ) -> Result<()> {
         let mut pos = 2; // Skip reserved
         let (exchange_name, remaining) = AmqpLib::parse_short_string(&args[pos..])?;
         pos = 1 + exchange_name.len();
@@ -2414,7 +2626,9 @@ async fn handle_basic_publish(
 
         // Find queues bound to this exchange/routing key
         let matching_queues = if let Some(vhost) = self.virtual_hosts.get(&connection.vhost) {
-            vhost.bindings.iter()
+            vhost
+                .bindings
+                .iter()
                 .filter(|b| b.exchange == exchange_name && b.routing_key == routing_key)
                 .map(|b| b.queue.clone())
                 .collect::<Vec<String>>()
@@ -2624,7 +2838,12 @@ pub struct ConsumerConfig {
 #[command(version = "1.0.0")]
 pub struct Config {
     // === Common Arguments ===
-    #[arg(short = 'H', long, default_value = "localhost", help = "Server hostname")]
+    #[arg(
+        short = 'H',
+        long,
+        default_value = "localhost",
+        help = "Server hostname"
+    )]
     pub host: String,
 
     #[arg(short, long, default_value = "5672", help = "Server port")]
@@ -2636,7 +2855,12 @@ pub struct Config {
     #[arg(short, long, default_value = "guest", help = "Username")]
     pub user: String,
 
-    #[arg(short, long, default_value = "", help = "Password (if empty and user is not 'guest', will prompt)")]
+    #[arg(
+        short,
+        long,
+        default_value = "",
+        help = "Password (if empty, will prompt)"
+    )]
     pub password: String,
 
     #[arg(short, long, help = "Enable debug output")]
@@ -2785,7 +3009,11 @@ impl Config {
             internal: self.exchange_internal.is_internal(),
             queue: self.queue.clone(),
             exclusive: self.queue_exclusivity.is_exclusive(),
-            count: if self.test_mode { self.send_count } else { None },
+            count: if self.test_mode {
+                self.send_count
+            } else {
+                None
+            },
             send_interval: if self.send_interval_ms > 0 {
                 Some(Duration::from_millis(self.send_interval_ms))
             } else {
@@ -2800,7 +3028,11 @@ impl Config {
             prefetch_count: self.prefetch_count,
             no_ack: self.ack_mode.is_no_ack(),
             ack_mode: self.ack_mode.clone(),
-            count: if self.test_mode { self.receive_count } else { None },
+            count: if self.test_mode {
+                self.receive_count
+            } else {
+                None
+            },
             validate_messages: self.validate_messages,
         }
     }
@@ -2852,63 +3084,54 @@ async fn get_password(provided: Option<String>, log_config: &LogConfig) -> Resul
     match provided {
         Some(password) if !password.is_empty() => Ok(password),
         _ => {
-            // Read password from stdin without echo
-            use std::io::{self, Write};
-
-            // Print prompt to stderr
+            // Read password from stdin
             eprint!("Password: ");
-            io::stderr().flush().unwrap();
-
-            // Use crossterm or termion for proper terminal control
-            // For now, we'll use a platform-specific approach
 
             #[cfg(unix)]
             {
                 use std::os::unix::io::AsRawFd;
-                use libc::{tcgetattr, tcsetattr, ECHO, TCSANOW, termios};
-
-                let stdin_fd = io::stdin().as_raw_fd();
-                let mut termios = unsafe { std::mem::zeroed::<termios>() };
-
-                // Get current terminal settings
-                unsafe { tcgetattr(stdin_fd, &mut termios) };
-                let old_termios = termios;
-
-                // Disable echo
-                termios.c_lflag &= !ECHO;
-                unsafe { tcsetattr(stdin_fd, TCSANOW, &termios) };
-
-                // Read password
-                let mut password = String::new();
-                let result = io::stdin().read_line(&mut password);
-
-                // Restore terminal settings
-                unsafe { tcsetattr(stdin_fd, TCSANOW, &old_termios) };
-
-                // Print newline since echo was off
-                eprintln!();
-
-                match result {
-                    Ok(_) => Ok(password.trim().to_string()),
-                    Err(e) => Err(AmqpError::Configuration(format!("Failed to read password: {}", e))),
+                let fd = std::io::stdin().as_raw_fd();
+                let mut termios = unsafe { std::mem::zeroed() };
+                unsafe {
+                    libc::tcgetattr(fd, &mut termios);
+                    termios.c_lflag &= !libc::ECHO;
+                    libc::tcsetattr(fd, libc::TCSANOW, &termios);
                 }
+
+                let mut password = String::new();
+                let read_result = std::io::stdin().read_line(&mut password);
+
+                unsafe {
+                    libc::tcgetattr(fd, &mut termios);
+                    termios.c_lflag |= libc::ECHO;
+                    libc::tcsetattr(fd, libc::TCSANOW, &termios);
+                }
+
+                println!();
+                read_result.map_err(AmqpError::Io)?;
+                Ok(password.trim().to_string())
             }
 
             #[cfg(not(unix))]
             {
-                // On non-Unix systems, warn that password will be visible
-                eprintln!("Warning: Password will be visible on this platform");
-
-                use tokio::io::{AsyncBufReadExt, BufReader};
-                let stdin = tokio::io::stdin();
-                let mut reader = BufReader::new(stdin);
                 let mut password = String::new();
-
-                reader.read_line(&mut password).await
-                    .map_err(|e| AmqpError::Configuration(format!("Failed to read password: {}", e)))?;
-
+                std::io::stdin()
+                    .read_line(&mut password)
+                    .map_err(AmqpError::Io)?;
                 Ok(password.trim().to_string())
             }
+
+            // // For now, just read normally (in production, use a crate like rpassword)
+            // // Note: Password will be visible when typing
+            // use tokio::io::{AsyncBufReadExt, BufReader};
+            // let stdin = tokio::io::stdin();
+            // let mut reader = BufReader::new(stdin);
+            // let mut password = String::new();
+
+            // reader.read_line(&mut password).await
+            //     .map_err(|e| AmqpError::Configuration(format!("Failed to read password: {}", e)))?;
+
+            // Ok(password.trim().to_string())
         }
     }
 }
@@ -2930,29 +3153,54 @@ async fn main() -> Result<()> {
         log_info(&log_config, "Test mode enabled");
     }
 
-    // Get password securely if not provided and user is not guest
-    if config.password.is_empty() && config.user != "guest" {
-        config.password = get_password(None, &log_config).await?;
-    } else if config.password.is_empty() && config.user == "guest" {
-        config.password = "guest".to_string();
+    // Get password securely if not provided
+    if config.password.is_empty() {
+        if config.user != "guest" {
+            config.password = get_password(None, &log_config).await?;
+        } else {
+            config.password = "guest".to_string()
+        };
     }
 
     if config.server {
         // Start server
         let limits = config.to_resource_limits();
-        let server_result = AmqpServer::bind("server-1".to_string(), &config.host, config.port, limits, log_config.clone()).await?;
+        let server_result = AmqpServer::bind(
+            "server-1".to_string(),
+            &config.host,
+            config.port,
+            limits,
+            log_config.clone(),
+        )
+        .await?;
 
-        log_info(&log_config, &format!("Starting AMQP server on {}", server_result.bind_address));
-        log_info(&log_config, &format!("Resource limits: max_connections={}, max_channels_per_connection={}",
-                 server_result.resource_limits.max_connections,
-                 server_result.resource_limits.max_channels_per_connection));
+        log_info(
+            &log_config,
+            &format!("Starting AMQP server on {}", server_result.bind_address),
+        );
+        log_info(
+            &log_config,
+            &format!(
+                "Resource limits: max_connections={}, max_channels_per_connection={}",
+                server_result.resource_limits.max_connections,
+                server_result.resource_limits.max_channels_per_connection
+            ),
+        );
 
         // Create server instance and run
         let mut server = AmqpServer {
             server_id: server_result.server_id,
-            listener: TcpListener::bind((config.host.as_str(), config.port)).await
+            listener: TcpListener::bind((config.host.as_str(), config.port))
+                .await
                 .map_err(|e| AmqpError::Connection(format!("Failed to bind: {}", e)))?,
+            connections: HashMap::new(),
             limits: server_result.resource_limits,
+            stats: MessageStats::new(),
+            virtual_hosts: {
+                let mut vh = HashMap::new();
+                vh.insert("/".to_string(), AmqpServer::create_default_vhost("/"));
+                vh
+            },
             log_config: log_config.clone(),
         };
 
@@ -3110,7 +3358,10 @@ async fn main() -> Result<()> {
 
         // If neither producer nor consumer is specified, show help
         if !config.client_producer && !config.client_consumer {
-            log_error(&log_config, "Error: Must specify either --client-producer or --client-consumer or --server");
+            log_error(
+                &log_config,
+                "Error: Must specify either --client-producer or --client-consumer or --server",
+            );
             log_error(&log_config, "Use --help for more information");
             std::process::exit(1);
         }
@@ -3361,4 +3612,3 @@ impl Default for Config {
         }
     }
 }
-
