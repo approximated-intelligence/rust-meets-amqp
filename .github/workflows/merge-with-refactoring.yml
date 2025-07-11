@@ -1,0 +1,30 @@
+name: Merge master into feature branch
+
+on:
+  push:
+    branches:
+      - master  # trigger when master is updated
+
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout master
+        uses: actions/checkout@v4
+        with:
+          ref: master
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set Git user
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch all branches
+        run: git fetch --all
+
+      - name: Merge master into feature branch
+        run: |
+          git checkout refactor/1
+          git merge origin/master --no-edit
+          git push origin refactor/1
